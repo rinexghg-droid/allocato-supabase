@@ -1537,25 +1537,29 @@ else:
 
 upgrade_col_1, upgrade_col_2, upgrade_col_3 = st.sidebar.columns(3)
 
-def handle_upgrade_click(url):
+with upgrade_col_1:
     if st.session_state.get("auth_logged_in", False):
-        st.switch_page(build_checkout_url(url))
+        st.link_button("Basic", build_checkout_url(STRIPE_BASIC), use_container_width=True)
     else:
-        st.warning("Bitte erst einloggen oder registrieren, damit dein Kauf korrekt zugeordnet werden kann.")
-        if st.button("Jetzt einloggen / registrieren"):
+        st.warning(get_checkout_login_required_text(lang))
+        if st.button("Jetzt einloggen / registrieren", key="login_redirect_basic", use_container_width=True):
             st.switch_page("pages/1_Allocato.py")
 
-with upgrade_col_1:
-    if st.button("Basic", use_container_width=True):
-        handle_upgrade_click(STRIPE_BASIC)
-
 with upgrade_col_2:
-    if st.button("Pro", use_container_width=True):
-        handle_upgrade_click(STRIPE_PRO)
+    if st.session_state.get("auth_logged_in", False):
+        st.link_button("Pro", build_checkout_url(STRIPE_PRO), use_container_width=True)
+    else:
+        st.warning(get_checkout_login_required_text(lang))
+        if st.button("Jetzt einloggen / registrieren", key="login_redirect_pro", use_container_width=True):
+            st.switch_page("pages/1_Allocato.py")
 
 with upgrade_col_3:
-    if st.button("Lifetime", use_container_width=True):
-        handle_upgrade_click(STRIPE_LIFETIME)
+    if st.session_state.get("auth_logged_in", False):
+        st.link_button("Lifetime", build_checkout_url(STRIPE_LIFETIME), use_container_width=True)
+    else:
+        st.warning(get_checkout_login_required_text(lang))
+        if st.button("Jetzt einloggen / registrieren", key="login_redirect_lifetime", use_container_width=True):
+            st.switch_page("pages/1_Allocato.py")
 
 st.sidebar.caption(AUTH_T["stripe_note"])
 
