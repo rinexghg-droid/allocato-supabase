@@ -8,10 +8,17 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-APP_URL = "https://allocato.streamlit.app/Allocato"
 STRIPE_BASIC = "https://buy.stripe.com/fZu9AN2mIeJu3oRbNcfjG02"
 STRIPE_PRO = "https://buy.stripe.com/3cIaERf9udFq2kN04ufjG01"
 STRIPE_LIFETIME = "https://buy.stripe.com/8x2dR37H21WI4sV3gGfjG00"
+
+def build_checkout_url(base_url: str) -> str:
+    email = st.session_state.get("auth_user_email", "").strip().lower()
+    if email:
+        separator = "&" if "?" in base_url else "?"
+        return f"{base_url}{separator}locked_prefilled_email={email.replace("@", "%40")}"
+    return base_url
+
 
 if "lang" not in st.session_state:
     st.session_state.lang = "DE"
@@ -112,7 +119,7 @@ TEXT = {
                 "period": "pro Monat",
                 "features": ["1 Korb", "3 Jahre Historie", "Begrenzte Exports"],
                 "button": "Kostenlos starten",
-                "url": APP_URL,
+                "internal_page": "pages/1_Allocato.py",
                 "badge": "",
                 "highlight": False,
                 "accent": "free",
@@ -277,7 +284,7 @@ TEXT = {
                 "period": "per month",
                 "features": ["1 basket", "3 years of history", "Limited exports"],
                 "button": "Start for Free",
-                "url": APP_URL,
+                "internal_page": "pages/1_Allocato.py",
                 "badge": "",
                 "highlight": False,
                 "accent": "free",
@@ -402,7 +409,11 @@ def render_pricing_card(plan: dict, idx: int):
 
         button_cls = "primary" if plan["button_kind"] == "primary" else "secondary"
         st.markdown(f"<div class='pricing-link {button_cls}'>", unsafe_allow_html=True)
-        st.link_button(plan["button"], plan["url"], use_container_width=True)
+        if plan.get("internal_page"):
+            if st.button(plan["button"], key=f"plan_{idx}", use_container_width=True, type="primary" if plan["button_kind"] == "primary" else "secondary"):
+                st.switch_page(plan["internal_page"])
+        else:
+            st.link_button(plan["button"], build_checkout_url(plan["url"]), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -902,7 +913,8 @@ st.markdown(
 hero_button_col, hero_note_col = st.columns([2, 5], vertical_alignment="center")
 with hero_button_col:
     st.markdown('<div class="hero-btn">', unsafe_allow_html=True)
-    st.link_button(t["hero_cta"], APP_URL, use_container_width=True)
+    if st.button(t["hero_cta"], type="primary", use_container_width=True):
+        st.switch_page("pages/1_Allocato.py")
     st.markdown("</div>", unsafe_allow_html=True)
 with hero_note_col:
     st.markdown(
