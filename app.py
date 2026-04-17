@@ -417,16 +417,28 @@ def render_pricing_card(plan: dict, idx: int):
         button_cls = "primary" if plan["button_kind"] == "primary" else "secondary"
         st.markdown(f"<div class='pricing-link {button_cls}'>", unsafe_allow_html=True)
         if plan.get("internal_page"):
-            if st.button(plan["button"], key=f"plan_{idx}", use_container_width=True, type="primary" if plan["button_kind"] == "primary" else "secondary"):
+            if st.button(
+                plan["button"],
+                key=f"plan_{idx}",
+                use_container_width=True,
+                type="primary" if plan["button_kind"] == "primary" else "secondary",
+            ):
                 st.switch_page(plan["internal_page"])
         else:
-            if st.button(plan["button"], key=f"plan_paid_{idx}", use_container_width=True):
-                if st.session_state.get("auth_logged_in", False):
-                    st.switch_page(build_checkout_url(plan["url"]))
-                else:
-                    st.warning("Bitte erst einloggen oder registrieren, damit dein Kauf korrekt zugeordnet werden kann.")
-                    if st.button("Jetzt einloggen / registrieren", key=f"login_redirect_{idx}"):
-                        st.switch_page("pages/1_Allocato.py")
+            if st.session_state.get("auth_logged_in", False):
+                st.link_button(
+                    plan["button"],
+                    build_checkout_url(plan["url"]),
+                    use_container_width=True,
+                )
+            else:
+                st.warning(get_checkout_login_required_text())
+                if st.button(
+                    "Jetzt einloggen / registrieren",
+                    key=f"login_redirect_{idx}",
+                    use_container_width=True,
+                ):
+                    st.switch_page("pages/1_Allocato.py")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
