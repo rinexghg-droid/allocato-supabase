@@ -17,9 +17,9 @@ st.set_page_config(page_title="Allocato", layout="wide")
 # =========================
 # Subscription / Pricing Links
 # =========================
-STRIPE_BASIC = "https://buy.stripe.com/fZu9AN2mIeJu3oRbNcfjG02"
-STRIPE_PRO = "https://buy.stripe.com/3cIaERf9udFq2kN04ufjG01"
-STRIPE_LIFETIME = "https://buy.stripe.com/8x2dR37H21WI4sV3gGfjG00"
+STRIPE_BASIC = "https://buy.stripe.com/test_8x2dR37H21WI4sV3gGfjG00"
+STRIPE_PRO = "https://buy.stripe.com/test_3cIaERf9udFq2kN04ufjG01"
+STRIPE_LIFETIME = "https://buy.stripe.com/test_fZu9AN2mIeJu3oRbNcfjG02"
 
 # =========================
 # User / Auth System (Supabase)
