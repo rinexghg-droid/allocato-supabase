@@ -168,7 +168,12 @@ def create_user(email: str, password: str) -> tuple[bool, str]:
             "created_at": now,
             "updated_at": now,
         }).execute()
-        return True, "Registrierung erfolgreich. Du kannst dich jetzt einloggen."
+        st.session_state["auth_logged_in"] = True
+        st.session_state["auth_user_email"] = normalized
+        st.session_state["auth_is_admin"] = normalized in ADMIN_EMAILS
+        st.session_state["subscription_tier"] = "Free"
+        st.session_state["auth_loaded_for"] = ""
+        return True, "Registrierung erfolgreich."
     except Exception as e:
         return False, f"Registrierung fehlgeschlagen: {e}"
 
@@ -1528,16 +1533,27 @@ elif tier == "Pro":
 else:
     st.sidebar.success(T["lifetime_active"])
 
-if st.session_state.get("auth_logged_in", False):
-    upgrade_col_1, upgrade_col_2, upgrade_col_3 = st.sidebar.columns(3)
-    with upgrade_col_1:
-        st.link_button("Basic", build_checkout_url(STRIPE_BASIC), use_container_width=True)
-    with upgrade_col_2:
-        st.link_button("Pro", build_checkout_url(STRIPE_PRO), use_container_width=True)
-    with upgrade_col_3:
-        st.link_button("Lifetime", build_checkout_url(STRIPE_LIFETIME), use_container_width=True)
-else:
-    st.sidebar.info(get_checkout_login_required_text(lang))
+upgrade_col_1, upgrade_col_2, upgrade_col_3 = st.sidebar.columns(3)
+
+def handle_upgrade_click(url):
+    if st.session_state.get("auth_logged_in", False):
+        st.switch_page(build_checkout_url(url))
+    else:
+        st.warning("Bitte erst einloggen oder registrieren, damit dein Kauf korrekt zugeordnet werden kann.")
+        if st.button("Jetzt einloggen / registrieren"):
+            st.switch_page("pages/1_Allocato.py")
+
+with upgrade_col_1:
+    if st.button("Basic", use_container_width=True):
+        handle_upgrade_click(STRIPE_BASIC)
+
+with upgrade_col_2:
+    if st.button("Pro", use_container_width=True):
+        handle_upgrade_click(STRIPE_PRO)
+
+with upgrade_col_3:
+    if st.button("Lifetime", use_container_width=True):
+        handle_upgrade_click(STRIPE_LIFETIME)
 
 st.sidebar.caption(AUTH_T["stripe_note"])
 
