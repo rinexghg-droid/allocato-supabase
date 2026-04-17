@@ -8,9 +8,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-STRIPE_BASIC = "https://buy.stripe.com/test_8x2dR37H21WI4sV3gGfjG00"
-STRIPE_PRO = "https://buy.stripe.com/test_3cIaERf9udFq2kN04ufjG01"
-STRIPE_LIFETIME = "https://buy.stripe.com/test_fZu9AN2mIeJu3oRbNcfjG02"
+STRIPE_BASIC = "https://buy.stripe.com/fZu9AN2mIeJu3oRbNcfjG02"
+STRIPE_PRO = "https://buy.stripe.com/3cIaERf9udFq2kN04ufjG01"
+STRIPE_LIFETIME = "https://buy.stripe.com/8x2dR37H21WI4sV3gGfjG00"
 
 def build_checkout_url(base_url: str) -> str:
     email = st.session_state.get("auth_user_email", "").strip().lower()
@@ -18,6 +18,13 @@ def build_checkout_url(base_url: str) -> str:
         separator = "&" if "?" in base_url else "?"
         return f"{base_url}{separator}locked_prefilled_email={email.replace("@", "%40")}"
     return base_url
+
+def get_checkout_login_required_text() -> str:
+    return (
+        "Bitte erst einloggen oder registrieren, damit dein Kauf korrekt deinem Account zugeordnet werden kann."
+        if st.session_state.get("lang", "DE") == "DE"
+        else "Please log in or register first so your purchase can be assigned correctly to your account."
+    )
 
 
 if "lang" not in st.session_state:
@@ -413,7 +420,10 @@ def render_pricing_card(plan: dict, idx: int):
             if st.button(plan["button"], key=f"plan_{idx}", use_container_width=True, type="primary" if plan["button_kind"] == "primary" else "secondary"):
                 st.switch_page(plan["internal_page"])
         else:
-            st.link_button(plan["button"], build_checkout_url(plan["url"]), use_container_width=True)
+            if st.session_state.get("auth_logged_in", False):
+                st.link_button(plan["button"], build_checkout_url(plan["url"]), use_container_width=True)
+            else:
+                st.info(get_checkout_login_required_text())
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
