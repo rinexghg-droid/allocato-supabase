@@ -17,9 +17,9 @@ st.set_page_config(page_title="Allocato", layout="wide")
 # =========================
 # Subscription / Pricing Links
 # =========================
-STRIPE_BASIC = "https://buy.stripe.com/test_8x2dR37H21WI4sV3gGfjG00"
-STRIPE_PRO = "https://buy.stripe.com/test_3cIaERf9udFq2kN04ufjG01"
-STRIPE_LIFETIME = "https://buy.stripe.com/test_fZu9AN2mIeJu3oRbNcfjG02"
+STRIPE_BASIC = "https://buy.stripe.com/fZu9AN2mIeJu3oRbNcfjG02"
+STRIPE_PRO = "https://buy.stripe.com/3cIaERf9udFq2kN04ufjG01"
+STRIPE_LIFETIME = "https://buy.stripe.com/8x2dR37H21WI4sV3gGfjG00"
 
 # =========================
 # User / Auth System (Supabase)
@@ -58,6 +58,11 @@ def build_checkout_url(base_url: str) -> str:
         separator = "&" if "?" in base_url else "?"
         return f"{base_url}{separator}locked_prefilled_email={quote(email)}"
     return base_url
+
+def get_checkout_login_required_text(lang: str) -> str:
+    if lang == "EN":
+        return "Please log in or register first so your purchase can be assigned correctly to your account."
+    return "Bitte erst einloggen oder registrieren, damit dein Kauf korrekt deinem Account zugeordnet werden kann."
 
 
 def ensure_auth_session_state():
@@ -1516,15 +1521,23 @@ if override_tier and st.session_state.get("auth_logged_in"):
 
 if tier == "Free":
     st.sidebar.warning(T["free_warning"])
-    st.sidebar.link_button(T["upgrade_basic"], build_checkout_url(STRIPE_BASIC), use_container_width=True)
 elif tier == "Basic":
     st.sidebar.info(T["basic_active"])
-    st.sidebar.link_button(T["upgrade_pro"], build_checkout_url(STRIPE_PRO), use_container_width=True)
 elif tier == "Pro":
     st.sidebar.success(T["pro_active"])
-    st.sidebar.link_button(T["upgrade_lifetime"], build_checkout_url(STRIPE_LIFETIME), use_container_width=True)
 else:
     st.sidebar.success(T["lifetime_active"])
+
+if st.session_state.get("auth_logged_in", False):
+    upgrade_col_1, upgrade_col_2, upgrade_col_3 = st.sidebar.columns(3)
+    with upgrade_col_1:
+        st.link_button("Basic", build_checkout_url(STRIPE_BASIC), use_container_width=True)
+    with upgrade_col_2:
+        st.link_button("Pro", build_checkout_url(STRIPE_PRO), use_container_width=True)
+    with upgrade_col_3:
+        st.link_button("Lifetime", build_checkout_url(STRIPE_LIFETIME), use_container_width=True)
+else:
+    st.sidebar.info(get_checkout_login_required_text(lang))
 
 st.sidebar.caption(AUTH_T["stripe_note"])
 
