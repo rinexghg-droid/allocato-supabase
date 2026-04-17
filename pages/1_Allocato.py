@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import re
 from datetime import datetime
+from urllib.parse import quote
 
 import streamlit as st
 import yfinance as yf
@@ -46,11 +47,18 @@ ADMIN_EMAILS = {
 #     "kev_cone@web.de": "Pro",
 #     "zweite@email.de": "Lifetime",
 # }
-TEST_ACCOUNT_TIER_OVERRIDES = {
-    "kev_cone@web.de": "Pro",
-}
+TEST_ACCOUNT_TIER_OVERRIDES = {}
 
 ALLOW_ADMIN_TIER_OVERRIDE = True
+
+
+def build_checkout_url(base_url: str) -> str:
+    email = normalize_email(st.session_state.get("auth_user_email", ""))
+    if email:
+        separator = "&" if "?" in base_url else "?"
+        return f"{base_url}{separator}locked_prefilled_email={quote(email)}"
+    return base_url
+
 
 def ensure_auth_session_state():
     auth_defaults = {
@@ -1508,13 +1516,13 @@ if override_tier and st.session_state.get("auth_logged_in"):
 
 if tier == "Free":
     st.sidebar.warning(T["free_warning"])
-    st.sidebar.link_button(T["upgrade_basic"], STRIPE_BASIC, use_container_width=True)
+    st.sidebar.link_button(T["upgrade_basic"], build_checkout_url(STRIPE_BASIC), use_container_width=True)
 elif tier == "Basic":
     st.sidebar.info(T["basic_active"])
-    st.sidebar.link_button(T["upgrade_pro"], STRIPE_PRO, use_container_width=True)
+    st.sidebar.link_button(T["upgrade_pro"], build_checkout_url(STRIPE_PRO), use_container_width=True)
 elif tier == "Pro":
     st.sidebar.success(T["pro_active"])
-    st.sidebar.link_button(T["upgrade_lifetime"], STRIPE_LIFETIME, use_container_width=True)
+    st.sidebar.link_button(T["upgrade_lifetime"], build_checkout_url(STRIPE_LIFETIME), use_container_width=True)
 else:
     st.sidebar.success(T["lifetime_active"])
 
