@@ -8,9 +8,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-STRIPE_BASIC = "https://buy.stripe.com/test_8x2dR37H21WI4sV3gGfjG00"
-STRIPE_PRO = "https://buy.stripe.com/test_3cIaERf9udFq2kN04ufjG01"
-STRIPE_LIFETIME = "https://buy.stripe.com/test_fZu9AN2mIeJu3oRbNcfjG02"
+STRIPE_BASIC = "https://buy.stripe.com/fZu9AN2mIeJu3oRbNcfjG02"
+STRIPE_PRO = "https://buy.stripe.com/3cIaERf9udFq2kN04ufjG01"
+STRIPE_LIFETIME = "https://buy.stripe.com/8x2dR37H21WI4sV3gGfjG00"
 
 def build_checkout_url(base_url: str) -> str:
     email = st.session_state.get("auth_user_email", "").strip().lower()
