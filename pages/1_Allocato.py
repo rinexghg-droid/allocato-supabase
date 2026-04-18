@@ -1685,6 +1685,132 @@ def get_backtest_floor_date(period: str) -> pd.Timestamp | None:
     period = str(period).strip().lower()
     return BACKTEST_FIXED_START_BY_PERIOD.get(period, BACKTEST_FIXED_START_DEFAULT)
 
+
+NUMERIC_EPS = 1e-12
+MAX_SAFE_DAILY_RETURN = 1.50
+MIN_SAFE_DAILY_RETURN = -0.95
+
+def safe_float(value, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return default
+    if not np.isfinite(out):
+        return default
+    return out
+
+def safe_div(numerator: float, denominator: float, default: float = 0.0) -> float:
+    num = safe_float(numerator, default=default)
+    den = safe_float(denominator, default=0.0)
+    if abs(den) <= NUMERIC_EPS:
+        return default
+    out = num / den
+    if not np.isfinite(out):
+        return default
+    return out
+
+def safe_log_growth_from_return(ret: float, min_ret: float = MIN_SAFE_DAILY_RETURN, max_ret: float = MAX_SAFE_DAILY_RETURN) -> float:
+    r = safe_float(ret, default=0.0)
+    r = float(np.clip(r, min_ret, max_ret))
+    return float(np.log1p(r))
+
+def sanitize_price_panel(prices: pd.DataFrame, max_daily_return: float = 5.0, min_daily_return: float = -0.95) -> pd.DataFrame:
+    if prices is None or prices.empty:
+        return pd.DataFrame()
+
+    clean = prices.copy()
+    clean = clean.apply(pd.to_numeric, errors="coerce")
+    clean = clean.replace([np.inf, -np.inf], np.nan)
+    clean = clean.where(clean > 0)
+
+    for col in clean.columns:
+        s = clean[col].copy()
+        prev = np.nan
+        sanitized = []
+        for val in s:
+            if pd.isna(val):
+                sanitized.append(np.nan)
+                continue
+            val_f = safe_float(val, default=np.nan)
+            if pd.isna(prev):
+                sanitized.append(val_f)
+                prev = val_f
+                continue
+            raw_ret = safe_div(val_f - prev, prev, default=0.0)
+            if raw_ret > max_daily_return:
+                val_f = prev * (1.0 + max_daily_return)
+            elif raw_ret < min_daily_return:
+                val_f = prev * (1.0 + min_daily_return)
+            sanitized.append(val_f)
+            prev = val_f
+        clean[col] = pd.Series(sanitized, index=s.index, dtype=float)
+
+    return clean
+
+def build_flow_series(dates: pd.Index, initial_capital: float, monthly_savings: float) -> pd.Series:
+    flows = pd.Series(0.0, index=dates, dtype=float)
+    if len(dates) == 0:
+        return flows
+    flows.iloc[0] = float(initial_capital)
+    for i in range(1, len(dates)):
+        dt = dates[i]
+        prev = dates[i - 1]
+        if dt.month != prev.month or dt.year != prev.year:
+            flows.iloc[i] += float(monthly_savings)
+    return flows
+
+def stabilize_equity_series(
+    equity: pd.Series,
+    flows: pd.Series,
+    min_daily_return: float = MIN_SAFE_DAILY_RETURN,
+    max_daily_return: float = MAX_SAFE_DAILY_RETURN,
+    equity_cap: float | None = None,
+) -> pd.Series:
+    eq = pd.to_numeric(equity, errors="coerce").replace([np.inf, -np.inf], np.nan).copy()
+    eq = eq.reindex(flows.index)
+    out = pd.Series(index=flows.index, dtype=float)
+
+    if len(eq) == 0:
+        return pd.Series(dtype=float)
+
+    first_flow = max(0.0, safe_float(flows.iloc[0], default=0.0))
+    first_val = safe_float(eq.iloc[0], default=first_flow)
+    if first_val <= 0:
+        first_val = max(first_flow, 0.0)
+
+    if equity_cap is not None:
+        first_val = min(first_val, equity_cap)
+
+    out.iloc[0] = first_val
+
+    for i in range(1, len(eq)):
+        prev_raw = safe_float(eq.iloc[i - 1], default=out.iloc[i - 1])
+        curr_raw = safe_float(eq.iloc[i], default=prev_raw)
+        flow = safe_float(flows.iloc[i], default=0.0)
+
+        prev_stable = max(safe_float(out.iloc[i - 1], default=0.0), 0.0)
+        base_capital = max(prev_stable + flow, 0.0)
+
+        raw_ret = safe_div(curr_raw - prev_raw - flow, prev_raw, default=0.0)
+        log_growth = safe_log_growth_from_return(raw_ret, min_ret=min_daily_return, max_ret=max_daily_return)
+        next_val = base_capital * float(np.exp(log_growth))
+
+        if not np.isfinite(next_val):
+            next_val = base_capital
+        next_val = max(next_val, 0.0)
+
+        if equity_cap is not None:
+            next_val = min(next_val, equity_cap)
+
+        out.iloc[i] = next_val
+
+    return out.fillna(method="ffill").fillna(0.0)
+
+def safe_portfolio_cap(initial_capital: float, monthly_savings: float, periods: int) -> float:
+    total_contrib = float(initial_capital) + max(0, periods) * float(monthly_savings)
+    return max(total_contrib * 10000.0, 100000000.0)
+
+
 def _safe_series_history_stats(series_map: dict) -> pd.DataFrame:
     rows = []
     for ticker, series in series_map.items():
@@ -1901,24 +2027,38 @@ def compute_metrics(equity: pd.Series):
             "sharpe": 0.0,
         }
 
-    returns = eq.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    start_val = float(eq.iloc[0])
-    end_val = float(eq.iloc[-1])
-    total_return = ((end_val / start_val) - 1.0) * 100.0 if start_val > 0 else 0.0
-    days = len(eq)
-    years = max(days / 252.0, 1 / 252.0)
-    cagr = (((end_val / start_val) ** (1.0 / years)) - 1.0) * 100.0 if start_val > 0 and end_val > 0 else 0.0
+    ratios = (eq / eq.shift(1)).replace([np.inf, -np.inf], np.nan)
+    ratios = ratios.where(ratios > 0)
+    log_returns = np.log(ratios).replace([np.inf, -np.inf], np.nan).dropna()
+    if log_returns.empty:
+        log_returns = pd.Series(0.0, index=eq.index[1:])
+
+    log_returns = log_returns.clip(
+        lower=np.log1p(MIN_SAFE_DAILY_RETURN),
+        upper=np.log1p(MAX_SAFE_DAILY_RETURN),
+    )
+
+    start_val = max(safe_float(eq.iloc[0], default=0.0), NUMERIC_EPS)
+    end_val = max(safe_float(eq.iloc[-1], default=0.0), NUMERIC_EPS)
+    years = max(len(eq) / 252.0, 1.0 / 252.0)
+
+    total_log_return = float(np.clip(np.log(end_val / start_val), -50.0, 50.0))
+    total_return = (np.exp(total_log_return) - 1.0) * 100.0
+    cagr = (np.exp(total_log_return / years) - 1.0) * 100.0
+
     rolling_max = eq.cummax().replace(0, np.nan)
     drawdown = ((eq / rolling_max) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0) * 100.0
     max_dd = float(drawdown.min()) if not drawdown.empty else 0.0
-    vol = float(returns.std() * np.sqrt(252) * 100.0) if len(returns) > 1 else 0.0
-    sharpe = float((returns.mean() / returns.std()) * np.sqrt(252)) if returns.std() and returns.std() > 0 else 0.0
+
+    vol = float(log_returns.std(ddof=0) * np.sqrt(252) * 100.0) if len(log_returns) > 1 else 0.0
+    sharpe = float((log_returns.mean() / log_returns.std(ddof=0)) * np.sqrt(252)) if len(log_returns) > 1 and log_returns.std(ddof=0) > 0 else 0.0
+
     return {
-        "total_return": float(np.nan_to_num(total_return, nan=0.0, posinf=0.0, neginf=0.0)),
-        "cagr": float(np.nan_to_num(cagr, nan=0.0, posinf=0.0, neginf=0.0)),
-        "max_dd": float(np.nan_to_num(max_dd, nan=0.0, posinf=0.0, neginf=0.0)),
-        "volatility": float(np.nan_to_num(vol, nan=0.0, posinf=0.0, neginf=0.0)),
-        "sharpe": float(np.nan_to_num(sharpe, nan=0.0, posinf=0.0, neginf=0.0)),
+        "total_return": float(np.nan_to_num(np.clip(total_return, -100.0, 1_000_000.0), nan=0.0, posinf=0.0, neginf=0.0)),
+        "cagr": float(np.nan_to_num(np.clip(cagr, -100.0, 10_000.0), nan=0.0, posinf=0.0, neginf=0.0)),
+        "max_dd": float(np.nan_to_num(np.clip(max_dd, -100.0, 0.0), nan=0.0, posinf=0.0, neginf=0.0)),
+        "volatility": float(np.nan_to_num(np.clip(vol, 0.0, 1_000.0), nan=0.0, posinf=0.0, neginf=0.0)),
+        "sharpe": float(np.nan_to_num(np.clip(sharpe, -100.0, 100.0), nan=0.0, posinf=0.0, neginf=0.0)),
     }
 
 def is_rebalance_day(current_date, prev_date, mode):
@@ -2388,7 +2528,7 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
     }
 
 def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, top_n: int, simulate_taxes_de: bool, alignment_info: dict | None = None):
-    prices = prices.sort_index().copy()
+    prices = sanitize_price_panel(prices.sort_index().copy())
     tickers = list(prices.columns)
     effective_top_n = min(top_n, len(tickers))
     max_weight = max_weight_pct / 100.0
@@ -2417,15 +2557,16 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     if len(dates) < 30:
         raise ValueError("too_few_rows")
 
-    valuation_prices = prices.ffill(limit=7)
+    valuation_prices = prices.ffill(limit=7).copy()
+    portfolio_cap = safe_portfolio_cap(initial_capital, monthly_savings, len(dates))
 
     shares = {t: 0.0 for t in tickers}
     bot_lots_state = init_tax_lot_state(tickers)
-    cash = float(initial_capital)
+    cash = max(0.0, safe_float(initial_capital, default=0.0))
 
-    equity_bot = pd.Series(index=dates, dtype=float)
-    cash_bot = pd.Series(index=dates, dtype=float)
-    invested_bot = pd.Series(index=dates, dtype=float)
+    equity_bot_raw = pd.Series(index=dates, dtype=float)
+    cash_bot_raw = pd.Series(index=dates, dtype=float)
+    invested_bot_raw = pd.Series(index=dates, dtype=float)
     weight_history = pd.DataFrame(index=dates, columns=tickers, dtype=float)
     cash_weight_history = pd.Series(index=dates, dtype=float)
     cumulative_contributions = pd.Series(index=dates, dtype=float)
@@ -2441,26 +2582,31 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         tradable_prices = prices.loc[date]
         current_prices = valuation_prices.loc[date]
         prev_date = None if i == 0 else dates[i - 1]
+
         current_year = int(date.year)
         if bot_tax_state["year"] != current_year:
             bot_tax_state["year"] = current_year
             bot_tax_state["used_allowance"] = 0.0
 
         if daily_cash_rate > 0:
-            cash *= (1 + daily_cash_rate)
+            cash *= (1.0 + daily_cash_rate)
 
         monthly_contribution_added = False
         if i > 0 and (date.month != prev_date.month or date.year != prev_date.year):
-            cash += monthly_savings
+            cash += float(monthly_savings)
             monthly_contribution_added = True
 
         current_values = {}
         for t in tickers:
-            px = float(current_prices[t]) if pd.notna(current_prices[t]) else np.nan
-            current_values[t] = shares[t] * px if pd.notna(px) else 0.0
+            px = safe_float(current_prices.get(t, np.nan), default=np.nan)
+            current_values[t] = shares[t] * px if np.isfinite(px) and px > 0 else 0.0
 
-        total_equity_before = cash + float(np.nansum(list(current_values.values())))
-        current_weight_map = {t: (current_values[t] / total_equity_before if total_equity_before > 0 else 0.0) for t in tickers}
+        total_equity_before = max(0.0, cash + float(np.nansum(list(current_values.values()))))
+        total_equity_before = min(total_equity_before, portfolio_cap)
+        current_weight_map = {
+            t: safe_div(current_values[t], total_equity_before, default=0.0)
+            for t in tickers
+        }
 
         strategy_payload = build_target_portfolio_for_date(
             date=date,
@@ -2480,16 +2626,21 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         selected = strategy_payload["selected"]
         weights = strategy_payload["weights"]
         regime_code = strategy_payload["regime_code"]
-        invest_ratio = strategy_payload["invest_ratio"]
+        invest_ratio = float(np.clip(strategy_payload["invest_ratio"], 0.0, 1.0))
         strategy_name = strategy_payload["strategy_name"]
 
         target_values = {t: 0.0 for t in tickers}
-        investable_capital = total_equity_before * min(max(invest_ratio, 0.0), 1.0)
+        investable_capital = total_equity_before * invest_ratio
         for tkr in weights.index:
-            if pd.notna(tradable_prices.get(tkr, np.nan)):
-                target_values[tkr] = investable_capital * float(weights[tkr])
+            px = safe_float(tradable_prices.get(tkr, np.nan), default=np.nan)
+            if np.isfinite(px) and px > 0:
+                target_values[tkr] = investable_capital * safe_float(weights[tkr], default=0.0)
 
-        target_weight_map = {t: (target_values[t] / total_equity_before if total_equity_before > 0 else 0.0) for t in tickers}
+        target_weight_map = {
+            t: safe_div(target_values[t], total_equity_before, default=0.0)
+            for t in tickers
+        }
+
         held_assets = [t for t, s in shares.items() if s > 1e-12]
         threshold_trigger, threshold_reason = should_threshold_rebalance(
             date=date,
@@ -2507,11 +2658,11 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
 
         if do_rebalance:
             turnover = float(np.nansum([abs(target_values[t] - current_values[t]) for t in tickers]))
-            fees = turnover * fee_pct
+            fees = max(0.0, turnover * max(0.0, fee_pct))
             total_equity_after_fees = max(total_equity_before - fees, 0.0)
 
-            if total_equity_before > 0:
-                fee_adjustment = total_equity_after_fees / total_equity_before
+            if total_equity_before > NUMERIC_EPS:
+                fee_adjustment = safe_div(total_equity_after_fees, total_equity_before, default=1.0)
                 for t in tickers:
                     target_values[t] *= fee_adjustment
 
@@ -2520,19 +2671,21 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
             taxes_due_total = 0.0
 
             for tkr in tickers:
-                price = float(tradable_prices[tkr]) if pd.notna(tradable_prices[tkr]) else np.nan
-                old_shares = shares[tkr]
-
-                if pd.isna(price) or price <= 0:
+                price = safe_float(tradable_prices.get(tkr, np.nan), default=np.nan)
+                old_shares = max(0.0, safe_float(shares.get(tkr, 0.0), default=0.0))
+                if not np.isfinite(price) or price <= 0:
                     continue
 
-                new_shares = target_values[tkr] / price if price > 0 else 0.0
+                target_value = max(0.0, safe_float(target_values.get(tkr, 0.0), default=0.0))
+                new_shares = max(0.0, target_value / price)
+
                 lot = bot_lots_state.get(tkr, {"shares": 0.0, "cost_total": 0.0})
-                avg_cost = (lot["cost_total"] / lot["shares"]) if lot.get("shares", 0.0) > 1e-12 else price
+                avg_cost = safe_div(lot.get("cost_total", 0.0), lot.get("shares", 0.0), default=price)
                 unrealized_gain_pct = ((price / avg_cost) - 1.0) * 100.0 if avg_cost > 0 else 0.0
-                reduction_ratio = ((old_shares - new_shares) / old_shares) if old_shares > 0 and new_shares < old_shares else 0.0
+                reduction_ratio = safe_div(old_shares - new_shares, old_shares, default=0.0) if old_shares > 0 and new_shares < old_shares else 0.0
                 estimated_tax_drag_pct_map[tkr] = max(unrealized_gain_pct, 0.0) * 0.26375 * max(reduction_ratio, 0.0)
-                score_gap = float(total_score.loc[date].max() - total_score.loc[date].get(tkr, 0.0))
+                score_gap = safe_float(total_score.loc[date].max() - total_score.loc[date].get(tkr, 0.0), default=0.0)
+
                 if should_skip_sale_for_tax(
                     ticker=tkr,
                     current_shares=old_shares,
@@ -2541,7 +2694,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
                     lots_state=bot_lots_state,
                     taxes_enabled=simulate_taxes_de,
                     regime_code=regime_code,
-                    trend_score=float(component_scores["trend"].loc[date].get(tkr, 50.0)),
+                    trend_score=safe_float(component_scores["trend"].loc[date].get(tkr, 50.0), default=50.0),
                     score_gap=score_gap,
                 ):
                     new_shares = old_shares
@@ -2556,6 +2709,10 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
                     tax_state=bot_tax_state,
                     tax_rate=tax_rate,
                 )
+                updated_shares = max(0.0, safe_float(updated_shares, default=0.0))
+                delta_value = safe_float(delta_value, default=0.0)
+                tax_due = max(0.0, safe_float(tax_due, default=0.0))
+
                 delta_shares = updated_shares - old_shares
                 if abs(delta_shares) > 1e-12:
                     trade_count += 1
@@ -2563,16 +2720,20 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
                         buy_actions.append(f"{tkr} (+{delta_value:,.0f}€)")
                     elif delta_value < -1e-6:
                         sell_actions.append(f"{tkr} ({delta_value:,.0f}€)")
+
                 taxes_due_total += tax_due
                 shares[tkr] = updated_shares
 
             bot_tax_state["taxes_paid_total"] += taxes_due_total
-            invested_value = float(np.nansum([
-                shares[t] * (float(current_prices[t]) if pd.notna(current_prices[t]) else 0.0) for t in tickers
+            invested_value_after = float(np.nansum([
+                shares[t] * safe_float(current_prices.get(t, np.nan), default=0.0) for t in tickers
             ]))
-            cash = max(0.0, total_equity_after_fees - invested_value - taxes_due_total)
+            cash = max(0.0, total_equity_after_fees - invested_value_after - taxes_due_total)
 
-            target_weights_log[date] = {tkr: (target_values[tkr] / total_equity_before) for tkr in weights.index} if total_equity_before > 0 else {}
+            target_weights_log[date] = {
+                tkr: safe_div(target_values[tkr], total_equity_before, default=0.0)
+                for tkr in weights.index
+            } if total_equity_before > NUMERIC_EPS else {}
             selected_assets_log[date] = list(selected.index)
 
             bh_monthly_action = "—"
@@ -2610,33 +2771,44 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
             last_regime_code = regime_code
 
         invested_value = float(np.nansum([
-            shares[t] * (float(current_prices[t]) if pd.notna(current_prices[t]) else 0.0) for t in tickers
+            shares[t] * safe_float(current_prices.get(t, np.nan), default=0.0) for t in tickers
         ]))
         total_value = max(0.0, invested_value + cash)
-        equity_bot.loc[date] = total_value
-        cash_bot.loc[date] = cash
-        invested_bot.loc[date] = invested_value
+        total_value = min(total_value, portfolio_cap)
+
+        equity_bot_raw.loc[date] = total_value
+        cash_bot_raw.loc[date] = min(max(cash, 0.0), portfolio_cap)
+        invested_bot_raw.loc[date] = min(max(invested_value, 0.0), portfolio_cap)
+
         months_elapsed = (date.year - dates[0].year) * 12 + (date.month - dates[0].month)
         cumulative_contributions.loc[date] = float(initial_capital + max(0, months_elapsed) * monthly_savings)
 
-        if total_value > 0:
+        if total_value > NUMERIC_EPS:
             for t in tickers:
-                px = float(current_prices[t]) if pd.notna(current_prices[t]) else np.nan
-                weight_history.loc[date, t] = ((shares[t] * px) / total_value * 100) if pd.notna(px) else 0.0
-            cash_weight_history.loc[date] = cash / total_value * 100
+                px = safe_float(current_prices.get(t, np.nan), default=np.nan)
+                weight_history.loc[date, t] = ((shares[t] * px) / total_value * 100.0) if np.isfinite(px) and px > 0 else 0.0
+            cash_weight_history.loc[date] = safe_div(cash, total_value, default=0.0) * 100.0
         else:
             weight_history.loc[date] = 0.0
             cash_weight_history.loc[date] = 0.0
 
+    flows = build_flow_series(dates, initial_capital=float(initial_capital), monthly_savings=float(monthly_savings))
+    equity_bot = stabilize_equity_series(equity_bot_raw, flows, equity_cap=portfolio_cap)
+    cash_bot = cash_bot_raw.clip(lower=0.0, upper=portfolio_cap).fillna(method="ffill").fillna(0.0)
+    cash_bot = np.minimum(cash_bot.values, equity_bot.values)
+    cash_bot = pd.Series(cash_bot, index=dates, dtype=float)
+    invested_bot = (equity_bot - cash_bot).clip(lower=0.0, upper=portfolio_cap)
+
     bh_shares = {t: 0.0 for t in tickers}
     bh_lots_state = init_tax_lot_state(tickers)
-    bh_cash = float(initial_capital)
-    equity_bh = pd.Series(index=dates, dtype=float)
+    bh_cash = max(0.0, safe_float(initial_capital, default=0.0))
+    equity_bh_raw = pd.Series(index=dates, dtype=float)
 
     for i, date in enumerate(dates):
         current_prices = valuation_prices.loc[date]
         live_mask = prices.loc[date].notna()
         live_tickers = [t for t in tickers if live_mask.get(t, False)]
+
         current_year = int(date.year)
         if bh_tax_state["year"] != current_year:
             bh_tax_state["year"] = current_year
@@ -2645,34 +2817,41 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         if i > 0:
             prev_date = dates[i - 1]
             if date.month != prev_date.month or date.year != prev_date.year:
-                bh_cash += monthly_savings
+                bh_cash += float(monthly_savings)
 
         if live_tickers and bh_cash > 0:
             per_asset_bh = bh_cash / len(live_tickers)
+            invested_now = 0.0
             for t in live_tickers:
-                price_now = float(current_prices[t]) if pd.notna(current_prices[t]) else np.nan
-                if pd.isna(price_now) or price_now <= 0:
+                price_now = safe_float(current_prices.get(t, np.nan), default=np.nan)
+                if not np.isfinite(price_now) or price_now <= 0:
                     continue
                 add_shares = per_asset_bh / price_now
                 bh_shares[t] += add_shares
                 bh_lots_state[t]["shares"] += add_shares
                 bh_lots_state[t]["cost_total"] += add_shares * price_now
-            bh_cash = 0.0
+                invested_now += per_asset_bh
+            bh_cash = max(0.0, bh_cash - invested_now)
 
         bh_value = float(np.nansum([
-            max(0.0, bh_shares[t]) * (float(current_prices[t]) if pd.notna(current_prices[t]) else 0.0) for t in tickers
+            max(0.0, bh_shares[t]) * safe_float(current_prices.get(t, np.nan), default=0.0) for t in tickers
         ])) + max(0.0, bh_cash)
-        equity_bh.loc[date] = max(0.0, bh_value)
+        equity_bh_raw.loc[date] = min(max(0.0, bh_value), portfolio_cap)
+
+    equity_bh = stabilize_equity_series(equity_bh_raw, flows, equity_cap=portfolio_cap)
 
     bot_metrics = compute_metrics(equity_bot)
     bh_metrics = compute_metrics(equity_bh)
-    exposure = (invested_bot / equity_bot.replace(0, np.nan)).mean() * 100
-    avg_cash_quote = (cash_bot / equity_bot.replace(0, np.nan)).mean() * 100
-    outperformance_pp = bot_metrics["total_return"] - bh_metrics["total_return"]
+    exposure = safe_float((invested_bot / equity_bot.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).mean() * 100.0, default=0.0)
+    avg_cash_quote = safe_float((cash_bot / equity_bot.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).mean() * 100.0, default=0.0)
+    outperformance_pp = safe_float(bot_metrics["total_return"] - bh_metrics["total_return"], default=0.0)
 
     last_prices = valuation_prices.iloc[-1]
-    final_equity = equity_bot.iloc[-1]
-    current_weights = {t: ((shares[t] * float(last_prices[t]) / final_equity) * 100 if final_equity > 0 and pd.notna(last_prices[t]) else 0.0) for t in tickers}
+    final_equity = max(safe_float(equity_bot.iloc[-1], default=0.0), NUMERIC_EPS)
+    current_weights = {
+        t: (shares[t] * safe_float(last_prices.get(t, np.nan), default=0.0) / final_equity) * 100.0
+        for t in tickers
+    }
     weights_df = pd.DataFrame({
         T["weights_ticker_col"]: list(current_weights.keys()),
         T["weights_current_col"]: list(current_weights.values()),
@@ -2681,7 +2860,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     rebalance_df = pd.DataFrame(rebalance_log)
     weights_with_cash = weight_history.copy()
     weights_with_cash["Cash"] = cash_weight_history
-    weights_with_cash = weights_with_cash.fillna(0.0)
+    weights_with_cash = weights_with_cash.fillna(0.0).clip(lower=0.0, upper=100.0)
     weights_chart_df = simplify_weight_chart(weights_with_cash, top_k=weight_chart_top_n, other_label=T["other_label"])
     rebalance_dates = [entry[T["date_col"]] for entry in rebalance_log]
     weights_rebalance_only = weights_with_cash.loc[weights_with_cash.index.intersection(rebalance_dates)].copy()
@@ -2717,8 +2896,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     return {
         "bot_metrics": bot_metrics,
         "bh_metrics": bh_metrics,
-        "exposure": exposure,
-        "avg_cash_quote": avg_cash_quote,
+        "exposure": float(np.clip(exposure, 0.0, 100.0)),
+        "avg_cash_quote": float(np.clip(avg_cash_quote, 0.0, 100.0)),
         "outperformance_pp": outperformance_pp,
         "trade_count": trade_count,
         "conviction_power": conviction_power,
@@ -2727,6 +2906,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         "target_cash_ceiling_pct": target_cash_ceiling_pct,
         "equity_bot": equity_bot,
         "equity_bh": equity_bh,
+        "equity_bot_raw": equity_bot_raw,
+        "equity_bh_raw": equity_bh_raw,
         "cumulative_contributions": cumulative_contributions,
         "cash_bot": cash_bot,
         "invested_bot": invested_bot,
@@ -2758,8 +2939,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         "enable_ki_explanations": bool(st.session_state.get("enable_ki_explanations", False)),
         "estimated_tax_drag_pct_map": estimated_tax_drag_pct_map,
         "alignment_info": alignment_info or {},
+        "portfolio_cap": portfolio_cap,
     }
-
 
 def is_crypto_or_high_beta_ticker(ticker: str) -> bool:
     t = str(ticker).upper()
