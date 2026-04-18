@@ -74,13 +74,50 @@ def get_login_redirect_button_text(lang: str) -> str:
     return "✨ Log in / register now" if lang == "EN" else "✨ Jetzt einloggen / registrieren"
 
 
+def get_subscription_summary_text(tier: str, lang: str) -> str:
+    summaries = {
+        "DE": {
+            "Free": "1 Korb, bis zu 3 Jahre Historie und ein kompakter Einstieg in Allocato.",
+            "Basic": "Unbegrenzte Körbe, 5 Jahre Historie, CSV-Exports und globale Asset-Suche.",
+            "Pro": "Alles aus Basic plus mehr Komfort, priorisierte Updates und mehr Premium-Feeling.",
+            "Lifetime": "Einmal freischalten und dauerhaft alle starken Allocato-Vorteile genießen.",
+        },
+        "EN": {
+            "Free": "1 basket, up to 3 years of history and a compact entry into Allocato.",
+            "Basic": "Unlimited baskets, 5 years of history, CSV exports and global asset search.",
+            "Pro": "Everything from Basic plus more comfort, prioritized updates and extra premium vibes.",
+            "Lifetime": "Unlock once and keep enjoying the full Allocato experience for the long run.",
+        },
+    }
+    return summaries.get(lang, summaries["DE"]).get(tier, "")
+
+def format_subscription_expires_at(value: str | None, lang: str) -> str:
+    if not value:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", ""))
+    except Exception:
+        try:
+            dt = datetime.strptime(str(value), "%Y-%m-%d")
+        except Exception:
+            return str(value)
+    if lang == "EN":
+        return dt.strftime("%B %d, %Y")
+    months = [
+        "Januar", "Februar", "März", "April", "Mai", "Juni",
+        "Juli", "August", "September", "Oktober", "November", "Dezember"
+    ]
+    return f"{dt.day}. {months[dt.month - 1]} {dt.year}"
+
 def ensure_auth_session_state():
     auth_defaults = {
         "subscription_tier": "Free",
+        "subscription_expires_at": "2026-05-15",
         "auth_logged_in": False,
         "auth_user_email": "",
         "auth_loaded_for": "",
         "auth_is_admin": False,
+        "cancel_subscription_confirmed": False,
     }
     for key, value in auth_defaults.items():
         if key not in st.session_state:
@@ -323,6 +360,14 @@ def get_auth_texts(lang: str) -> dict:
             "plan_basic_badge": "📘 Basic active",
             "plan_pro_badge": "🚀 Pro active",
             "plan_lifetime_badge": "💎 Lifetime active",
+            "manage_subscription_title": "💳 Manage subscription",
+            "active_until": "Active until",
+            "plan_includes": "What's included",
+            "cancel_subscription_button": "🛑 Cancel subscription",
+            "cancel_subscription_confirm": "Yes, I really want to cancel this subscription.",
+            "cancel_subscription_warning": "Careful: canceling sends your plan back to Free in this demo flow.",
+            "cancel_subscription_success": "All set — your subscription was canceled and your account is now back on Free.",
+            "cancel_subscription_need_confirm": "Please confirm the cancellation first.",
             "admin_plan": "Admin plan control",
             "save_plan": "Save plan",
             "plan_saved": "Plan saved.",
@@ -363,6 +408,14 @@ def get_auth_texts(lang: str) -> dict:
         "plan_basic_badge": "📘 Basic aktiv",
         "plan_pro_badge": "🚀 Pro aktiv",
         "plan_lifetime_badge": "💎 Lifetime aktiv",
+        "manage_subscription_title": "💳 Mein Abo verwalten",
+        "active_until": "Aktiv bis",
+        "plan_includes": "Was enthalten ist",
+        "cancel_subscription_button": "🛑 Abo kündigen",
+        "cancel_subscription_confirm": "Ja, ich möchte dieses Abo wirklich kündigen.",
+        "cancel_subscription_warning": "Achtung: In diesem Demo-Flow wird dein Plan bei Kündigung direkt auf Free zurückgesetzt.",
+        "cancel_subscription_success": "Alles klar — dein Abo wurde beendet und dein Account ist jetzt wieder auf Free gesetzt.",
+        "cancel_subscription_need_confirm": "Bitte bestätige die Kündigung zuerst.",
         "admin_plan": "Admin-Plansteuerung",
         "save_plan": "Plan speichern",
         "plan_saved": "Plan gespeichert.",
@@ -1602,6 +1655,11 @@ st.markdown(
         border: 1px solid rgba(34,197,94,0.30);
         color: #ecfccb;
     }
+    div[data-testid="stButton"] button[kind="secondary"].danger-zone {
+        background: rgba(239,68,68,0.14);
+        border: 1px solid rgba(239,68,68,0.42);
+        color: #fecaca;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1797,6 +1855,31 @@ if st.session_state.get("auth_logged_in"):
                 st.rerun()
             else:
                 st.sidebar.error(message)
+
+    with st.sidebar.expander(AUTH_T["manage_subscription_title"], expanded=False):
+        st.markdown(
+            f"<div class='sidebar-plan-badge'>{TIER_ICONS.get(tier, '🔑')} {plan_badge_map.get(tier, tier)}</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"{AUTH_T['active_until']}: {format_subscription_expires_at(st.session_state.get('subscription_expires_at'), lang)}")
+        st.info(get_subscription_summary_text(tier, lang))
+        st.error(AUTH_T["cancel_subscription_warning"])
+        st.checkbox(
+            AUTH_T["cancel_subscription_confirm"],
+            key="cancel_subscription_confirmed",
+        )
+        if st.button(AUTH_T["cancel_subscription_button"], key="cancel_subscription_button", use_container_width=True, type="secondary"):
+            if not st.session_state.get("cancel_subscription_confirmed", False):
+                st.sidebar.error(AUTH_T["cancel_subscription_need_confirm"])
+            else:
+                update_user_tier(st.session_state["auth_user_email"], "Free")
+                st.session_state["subscription_tier"] = "Free"
+                st.session_state["subscription_expires_at"] = ""
+                st.session_state["cancel_subscription_confirmed"] = False
+                enforce_plan_limits()
+                save_logged_in_user_state()
+                st.sidebar.success(AUTH_T["cancel_subscription_success"])
+                st.rerun()
 
     if st.sidebar.button(AUTH_T["logout_button"], use_container_width=True):
         logout_user()
