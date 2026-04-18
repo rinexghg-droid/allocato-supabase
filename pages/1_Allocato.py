@@ -1858,7 +1858,19 @@ def render_calculation_results(context, T, lang, tier):
     c13.metric(T["metric_sharpe"], f"{bot_metrics['sharpe']:.2f}")
     
     st.success(T["end_capital_success"].format(value=f"{equity_bot.iloc[-1]:,.2f} €"))
+    st.markdown(
+        f"""
+        <div style="margin:.35rem 0 1rem 0;padding:.9rem 1rem;border-radius:16px;
+        background:linear-gradient(135deg, rgba(15,23,42,0.94) 0%, rgba(30,41,59,0.94) 100%);
+        border:1px solid rgba(255,255,255,0.08);">
+            <div style="font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;color:rgba(147,197,253,.92);font-weight:800;">CAGR Spotlight</div>
+            <div style="font-size:1.2rem;font-weight:800;color:#f8fafc;margin-top:.15rem;">{T["metric_cagr"]}: {bot_metrics['cagr']:.2f}%</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     
+    st.markdown("### 📈 Equity & Einzahlungen" if lang == "DE" else "### 📈 Equity & Contributions")
     # Equity chart
     equity_fig = go.Figure()
     equity_fig.add_trace(
@@ -1905,6 +1917,7 @@ def render_calculation_results(context, T, lang, tier):
     # Export
     st.markdown(f"### {T['export_title']}")
     st.caption(T["export_caption"])
+    st.caption("💾 Downloads behalten die aktuelle Berechnung sichtbar." if lang == "DE" else "💾 Downloads keep the current calculation visible.")
     
     export_equity_df = pd.DataFrame({
         T["date_col"]: equity_bot.index,
@@ -1967,9 +1980,16 @@ def render_calculation_results(context, T, lang, tier):
         st.markdown(f"### {T['interpret_why_title']}")
         st.markdown(T["interpret_why_text"])
     
-    with st.expander(T["annual_returns_title"], expanded=False):
+    with st.expander(T["annual_returns_title"], expanded=True):
         if not annual_returns_df.empty:
-            st.dataframe(annual_returns_df.style.format({T["annual_returns_bot"]: "{:.2f}", T["annual_returns_bh"]: "{:.2f}"}), use_container_width=True)
+            annual_display_df = annual_returns_df.copy()
+            st.dataframe(
+                annual_display_df.style.format({
+                    T["annual_returns_bot"]: "{:.2f}",
+                    T["annual_returns_bh"]: "{:.2f}",
+                }),
+                use_container_width=True,
+            )
 
     st.subheader(T["current_weights"])
     active_weights_df = weights_df[weights_df[T["weights_current_col"]] > 0].copy()
@@ -2040,12 +2060,27 @@ def render_calculation_results(context, T, lang, tier):
         else:
             st.write(T["weights_rebalance_empty"])
     
-    with st.expander(T["rebal_log"]):
+    st.markdown("### 🔁 Rebalancing-Log" if lang == "DE" else "### 🔁 Rebalancing Log")
+    with st.expander(T["rebal_log"], expanded=True):
         if not rebalance_df.empty:
             display_rebal_df = rebalance_df.copy()
+            preferred_cols = [
+                T["date_col"],
+                T["regime_ok_col"],
+                T["selected_assets_col"],
+                T["rebal_buys_col"],
+                T["rebal_sells_col"],
+                T["rebal_reason_col"],
+                T["turnover_col"],
+                T["fees_col"],
+                T["cash_eur_col"],
+                T["portfolio_eur_col"],
+            ]
+            display_rebal_df = display_rebal_df[[c for c in preferred_cols if c in display_rebal_df.columns]]
             numeric_cols = display_rebal_df.select_dtypes(include=[np.number]).columns
             display_rebal_df[numeric_cols] = display_rebal_df[numeric_cols].round(2)
-            st.dataframe(style_rebalance_log(display_rebal_df, T["rebal_buys_col"], T["rebal_sells_col"]), use_container_width=True)
+            styled_rebal_df = style_rebalance_log(display_rebal_df, T["rebal_buys_col"], T["rebal_sells_col"])
+            st.dataframe(styled_rebal_df, use_container_width=True)
         else:
             st.write(T["rebal_log_empty"])
     
