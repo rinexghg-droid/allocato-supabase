@@ -1054,9 +1054,9 @@ TRANSLATIONS = {
         "metric_sharpe": "Bot Sharpe",
         "metric_net_bot": "Netto nach Steuern (Bot)",
         "metric_net_bh": "Netto nach Steuern (Buy & Hold)",
-        "tax_gross_net_text": "- **Brutto vs. Netto:** Ohne Steuern wirkt aktive Umschichtung oft zu stark. Sobald reale Steuerabflüsse auf realisierte Gewinne berücksichtigt werden, sinkt der frei verfügbare Cash-Puffer des Bots.
-- **Warum Buy & Hold meist näher an Brutto bleibt:** Buy & Hold verkauft in dieser Simulation fast nichts. Dadurch werden Gewinne meist nicht laufend versteuert, sondern bleiben investiert.
-- **Warum der Bot trotzdem vorn bleiben kann:** Der Bot versucht trotz Steuerabzügen, durch Selektion, Cash-Management und Rebalancing effizientere Kapitalpfade zu finden.",
+        "tax_gross_net_text": ("- **Brutto vs. Netto:** Ohne Steuern wirkt aktive Umschichtung oft zu stark. Sobald reale Steuerabflüsse auf realisierte Gewinne berücksichtigt werden, sinkt der frei verfügbare Cash-Puffer des Bots.\n"
+                                "- **Warum Buy & Hold meist näher an Brutto bleibt:** Buy & Hold verkauft in dieser Simulation fast nichts. Dadurch werden Gewinne meist nicht laufend versteuert, sondern bleiben investiert.\n"
+                                "- **Warum der Bot trotzdem vorn bleiben kann:** Der Bot versucht trotz Steuerabzügen, durch Selektion, Cash-Management und Rebalancing effizientere Kapitalpfade zu finden."),
         "end_capital_success": "Endkapital dynamischer Bot: {value}",
         "equity_title": "Dynamischer Portfolio Bot vs Buy & Hold",
         "equity_label_bot": "Dynamischer Bot",
@@ -1357,9 +1357,9 @@ TRANSLATIONS = {
         "metric_sharpe": "Bot Sharpe",
         "metric_net_bot": "Net after taxes (Bot)",
         "metric_net_bh": "Net after taxes (Buy & Hold)",
-        "tax_gross_net_text": "- **Gross vs. net:** Without taxes, active rebalancing can look too strong. Once real tax drag on realized gains is included, the bot loses part of its free cash buffer.
-- **Why Buy & Hold often stays closer to gross:** Buy & Hold rarely sells in this simulation. Gains therefore remain mostly untaxed during the run and continue compounding.
-- **Why the bot can still stay ahead:** Even after taxes, the bot may still benefit from selection, cash management and rebalancing discipline.",
+        "tax_gross_net_text": ("- **Gross vs. net:** Without taxes, active rebalancing can look too strong. Once real tax drag on realized gains is included, the bot loses part of its free cash buffer.\n"
+                                "- **Why Buy & Hold often stays closer to gross:** Buy & Hold rarely sells in this simulation. Gains therefore remain mostly untaxed during the run and continue compounding.\n"
+                                "- **Why the bot can still stay ahead:** Even after taxes, the bot may still benefit from selection, cash management and rebalancing discipline."),
         "end_capital_success": "Ending capital dynamic bot: {value}",
         "equity_title": "Dynamic portfolio bot vs Buy & Hold",
         "equity_label_bot": "Dynamic bot",
