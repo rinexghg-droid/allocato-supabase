@@ -2094,14 +2094,16 @@ def compute_metrics(equity: pd.Series):
     daily_ret = daily_ret.clip(lower=MIN_SAFE_DAILY_RETURN, upper=MAX_SAFE_DAILY_RETURN)
     log_returns = np.log1p(daily_ret).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    total_log_return = float(log_returns.iloc[1:].sum()) if len(log_returns) > 1 else 0.0
+    first_value = max(safe_float(eq.iloc[0], default=0.0), NUMERIC_EPS)
+    last_value = max(safe_float(eq.iloc[-1], default=0.0), 0.0)
+    total_return = ((last_value / first_value) - 1.0) * 100.0
+
     try:
         years = max((pd.Timestamp(eq.index[-1]) - pd.Timestamp(eq.index[0])).days / 365.25, 1.0 / 252.0)
     except Exception:
         years = max(len(eq) / 252.0, 1.0 / 252.0)
 
-    total_return = (np.exp(total_log_return) - 1.0) * 100.0
-    cagr = (np.exp(total_log_return / years) - 1.0) * 100.0
+    cagr = (np.exp(float(log_returns.iloc[1:].sum()) / years) - 1.0) * 100.0 if len(log_returns) > 1 else 0.0
 
     rolling_max = eq.cummax().replace(0, np.nan)
     drawdown = ((eq / rolling_max) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0) * 100.0
@@ -2111,12 +2113,18 @@ def compute_metrics(equity: pd.Series):
     sharpe = float((log_returns.mean() / log_returns.std(ddof=0)) * np.sqrt(252)) if len(log_returns) > 1 and log_returns.std(ddof=0) > NUMERIC_EPS else 0.0
 
     return {
-        "total_return": float(np.nan_to_num(np.clip(total_return, -100.0, 5000.0), nan=0.0, posinf=0.0, neginf=0.0)),
+        "total_return": float(np.nan_to_num(total_return, nan=0.0, posinf=0.0, neginf=0.0)),
         "cagr": float(np.nan_to_num(np.clip(cagr, -100.0, 150.0), nan=0.0, posinf=0.0, neginf=0.0)),
         "max_dd": float(np.nan_to_num(np.clip(max_dd, -100.0, 0.0), nan=0.0, posinf=0.0, neginf=0.0)),
         "volatility": float(np.nan_to_num(np.clip(vol, 0.0, 250.0), nan=0.0, posinf=0.0, neginf=0.0)),
         "sharpe": float(np.nan_to_num(np.clip(sharpe, -20.0, 20.0), nan=0.0, posinf=0.0, neginf=0.0)),
     }
+
+def compute_total_return_from_paid_in(end_equity: float, total_paid_in: float) -> float:
+    end_value = max(safe_float(end_equity, default=0.0), 0.0)
+    paid_in = max(safe_float(total_paid_in, default=0.0), NUMERIC_EPS)
+    total_return = ((end_value / paid_in) - 1.0) * 100.0
+    return float(np.nan_to_num(total_return, nan=0.0, posinf=0.0, neginf=0.0))
 
 def is_rebalance_day(current_date, prev_date, mode):
     if mode in ("Aus", "Off"):
@@ -2933,6 +2941,17 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
 
     bot_metrics = compute_metrics(equity_bot)
     bh_metrics = compute_metrics(equity_bh)
+
+    total_paid_in_final = safe_float(cumulative_contributions.iloc[-1], default=0.0)
+    bot_metrics["total_return"] = compute_total_return_from_paid_in(
+        end_equity=safe_float(equity_bot.iloc[-1], default=0.0),
+        total_paid_in=total_paid_in_final,
+    )
+    bh_metrics["total_return"] = compute_total_return_from_paid_in(
+        end_equity=safe_float(equity_bh.iloc[-1], default=0.0),
+        total_paid_in=total_paid_in_final,
+    )
+
     exposure = safe_float((invested_bot / equity_bot.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).mean() * 100.0, default=0.0)
     avg_cash_quote = safe_float((cash_bot / equity_bot.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).mean() * 100.0, default=0.0)
     outperformance_pp = safe_float(bot_metrics["total_return"] - bh_metrics["total_return"], default=0.0)
@@ -3140,6 +3159,10 @@ def render_calculation_results(context, T, lang, tier):
     bot_taxes_paid = context.get("bot_taxes_paid", 0.0)
     bh_taxes_paid = context.get("bh_taxes_paid", 0.0)
     alignment_info = context.get("alignment_info", {})
+
+    st.write("DEBUG Bot Rendite:", f"{bot_metrics['total_return']:.2f}%")
+    st.write("DEBUG BH Rendite:", f"{bh_metrics['total_return']:.2f}%")
+    st.write("DEBUG Outperformance:", f"{outperformance_pp:.2f} pp")
 
     # Status
     if outperformance_pp > 0:
