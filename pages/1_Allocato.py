@@ -2143,40 +2143,41 @@ def is_rebalance_day(current_date, prev_date, mode):
         return current_date.year != prev_date.year and current_date.year % 5 == 0
     return False
 
+
 def conviction_weights(score_series: pd.Series, max_weight: float, power: float) -> pd.Series:
     s = score_series.copy().astype(float)
     s = s[s > 0].copy()
     if s.empty:
-        return s
-    hard_cap = min(max_weight, 0.30)
-    s = (s.clip(lower=0.0) + 1e-9) ** max(1.0, min(power, 2.8))
+        return pd.Series(dtype=float)
+
+    hard_cap = min(max_weight, 0.28)
+    power = max(1.0, min(power, 2.0))
+
+    s = (s.clip(lower=0.0) + 1e-9) ** power
     s = s / s.sum()
+
     final = pd.Series(0.0, index=s.index, dtype=float)
     remaining = 1.0
     active = s.copy()
+
     while len(active) > 0 and remaining > 1e-12:
         active = active / active.sum()
         proposed = active * remaining
         capped_mask = proposed >= hard_cap - 1e-12
+
         if not capped_mask.any():
             final.loc[active.index] += proposed
-            remaining = 0.0
             break
-        capped_assets = proposed[capped_mask].index.tolist()
-        for asset in capped_assets:
+
+        for asset in proposed[capped_mask].index:
             addable = max(0.0, hard_cap - final.loc[asset])
             if addable > 0:
                 final.loc[asset] += addable
                 remaining -= addable
-        active = active.drop(index=capped_assets, errors="ignore")
-    if remaining > 1e-12 and len(final) > 0:
-        under_cap = final[final < hard_cap - 1e-12].index.tolist()
-        if under_cap:
-            add = remaining / len(under_cap)
-            for asset in under_cap:
-                final.loc[asset] += min(add, hard_cap - final.loc[asset])
-    if final.sum() > 0:
-        final = final / final.sum()
+
+        active = active.drop(index=proposed[capped_mask].index, errors="ignore")
+
+    final = final / final.sum() if final.sum() > 0 else final
     return final
 
 def build_soft_cash_selection(score_today, trend_ok, top_n, min_score, invest_ratio, max_weight, power):
@@ -2482,25 +2483,31 @@ def compute_total_score_by_regime(prices: pd.DataFrame, regime_df: pd.DataFrame,
         total.loc[dt] = base_score
     return total.clip(lower=0, upper=100)
 
+
 def should_threshold_rebalance(date, regime_code: str, held_assets: list[str], selected_assets: list[str], current_weight_map: dict, target_weight_map: dict, score_today: pd.Series, component_scores: dict, last_regime_code: str | None) -> tuple[bool, str]:
     if last_regime_code is not None and regime_code != last_regime_code:
         return True, "Regimewechsel"
+
     for ticker in selected_assets:
         drift = abs(target_weight_map.get(ticker, 0.0) - current_weight_map.get(ticker, 0.0))
-        if drift > 0.18:
-            return True, "Gewichtsdrift > 18%"
+        if drift > 0.22:
+            return True, "Gewichtsdrift > 22%"
+
     if held_assets:
         held_score = score_today.reindex(held_assets).dropna().mean() if any(t in score_today.index for t in held_assets) else 0.0
         selected_score = score_today.reindex(selected_assets).dropna().mean() if any(t in score_today.index for t in selected_assets) else 0.0
-        if selected_score - held_score > 22:
+        if selected_score - held_score > 28:
             return True, "neues Top-Asset deutlich besser"
+
     for ticker in held_assets:
         try:
-            if component_scores["trend"].loc[date, ticker] < 22:
+            if component_scores["trend"].loc[date, ticker] < 18:
                 return True, f"Trendbruch {ticker}"
         except Exception:
             pass
+
     return False, "Kein Schwellen-Trigger"
+
 def should_skip_sale_for_tax(ticker: str, current_shares: float, target_shares: float, price: float, lots_state: dict, taxes_enabled: bool, regime_code: str, trend_score: float, score_gap: float) -> bool:
     if not taxes_enabled or target_shares >= current_shares or current_shares <= 0 or price <= 0:
         return False
@@ -2533,6 +2540,7 @@ def should_skip_sale_for_tax(ticker: str, current_shares: float, target_shares: 
     return False, "Kein Schwellen-Trigger"
 
 
+
 def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score: pd.DataFrame, regime_df: pd.DataFrame, component_scores: dict, effective_top_n: int, max_weight: float, soft_cash_mode: bool, cash_floor: float, cash_ceiling: float, soft_invest_ratio: float, min_score_user: float, conviction_power: float) -> dict:
     regime_code = regime_df.loc[date, "regime_code"]
     profile = get_regime_profile(regime_code)
@@ -2547,22 +2555,16 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
     dynamic_floor = max(min_score_user * 100, profile["min_score"] - 10.0)
 
     if regime_code == "BULL":
-        eligible = score_today[(trend_today.reindex(score_today.index) >= 36) & (momentum_today.reindex(score_today.index) >= 40)]
-        eligible = eligible + regime_fit_today.reindex(eligible.index).fillna(50) * 0.05 + quality_today.reindex(eligible.index).fillna(50) * 0.02
+        eligible = score_today[(trend_today.reindex(score_today.index) >= 42) & (momentum_today.reindex(score_today.index) >= 38)]
+        eligible = eligible + regime_fit_today.reindex(eligible.index).fillna(50) * 0.04 + quality_today.reindex(eligible.index).fillna(50) * 0.02
     elif regime_code == "TRANSITION":
         eligible = score_today[(quality_today.reindex(score_today.index) >= 34) & (risk_today.reindex(score_today.index) >= 30)]
     elif regime_code == "BEAR":
         eligible = score_today[(risk_today.reindex(score_today.index) >= 28) & (quality_today.reindex(score_today.index) >= 32)]
     else:
-        eligible = score_today[(trend_today.reindex(score_today.index) >= 34) & (momentum_today.reindex(score_today.index) >= 36)]
+        eligible = score_today[(trend_today.reindex(score_today.index) >= 42) & (momentum_today.reindex(score_today.index) >= 38)]
 
     eligible = eligible[eligible >= dynamic_floor]
-
-    if regime_code in {"BULL", "RECOVERY"}:
-        for ticker in list(score_today.index):
-            if is_crypto_or_high_beta_ticker(ticker):
-                eligible.loc[ticker] = max(float(eligible.get(ticker, np.nan)) if ticker in eligible.index else np.nan, float(score_today.loc[ticker]))
-
     selected = eligible.sort_values(ascending=False).head(effective_top_n)
 
     if len(selected) == 0:
@@ -2576,9 +2578,10 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
                 "strategy_name": profile["strategy"] + " / Cash",
                 "cash_target": min(max(cash_floor, profile["cash_target"]), cash_ceiling),
             }
+
         shifted = fallback - fallback.min() + 1e-6
-        weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.15, conviction_power - 0.1))
-        invest_ratio = profile["invest_ratio"] if regime_code in {"BULL", "RECOVERY"} else min(profile["invest_ratio"], soft_invest_ratio if soft_cash_mode else profile["invest_ratio"])
+        weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.05, conviction_power - 0.2))
+        invest_ratio = min(0.96, soft_invest_ratio) if soft_cash_mode else 0.93
         return {
             "selected": fallback,
             "weights": weights,
@@ -2589,11 +2592,12 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
         }
 
     shifted = selected - selected.min() + 1e-6
-    weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.2, conviction_power))
+    weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.1, min(conviction_power, 2.0)))
+    invest_ratio = min(0.96, soft_invest_ratio) if soft_cash_mode else 0.93
     return {
         "selected": selected,
         "weights": weights,
-        "invest_ratio": profile["invest_ratio"],
+        "invest_ratio": invest_ratio,
         "regime_code": regime_code,
         "strategy_name": profile["strategy"],
         "cash_target": min(max(cash_floor, profile["cash_target"]), cash_ceiling),
