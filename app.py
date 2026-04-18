@@ -12,6 +12,9 @@ STRIPE_BASIC = "https://buy.stripe.com/fZu9AN2mIeJu3oRbNcfjG02"
 STRIPE_PRO = "https://buy.stripe.com/3cIaERf9udFq2kN04ufjG01"
 STRIPE_LIFETIME = "https://buy.stripe.com/8x2dR37H21WI4sV3gGfjG00"
 
+APP_BASE_URL = "https://allocato-finance.streamlit.app"
+BOT_PUBLIC_URL = f"{APP_BASE_URL}/Allocato"
+
 def build_checkout_url(base_url: str) -> str:
     email = st.session_state.get("auth_user_email", "").strip().lower()
     if email:
@@ -21,21 +24,52 @@ def build_checkout_url(base_url: str) -> str:
 
 def get_checkout_login_required_text() -> str:
     return (
-        "Bitte erst einloggen oder registrieren, damit dein Kauf korrekt deinem Account zugeordnet werden kann."
+        "🚀 Fast da – logge dich bitte erst ein oder registriere dich, damit dein Upgrade sauber deinem Allocato-Account zugeordnet wird."
         if st.session_state.get("lang", "DE") == "DE"
-        else "Please log in or register first so your purchase can be assigned correctly to your account."
+        else "🚀 Almost there — please log in or register first so your upgrade can be assigned cleanly to your Allocato account."
     )
+
+def get_login_redirect_button_text() -> str:
+    return (
+        "✨ Jetzt einloggen / registrieren"
+        if st.session_state.get("lang", "DE") == "DE"
+        else "✨ Log in / register now"
+    )
+
+def get_payment_feedback() -> tuple[str, str] | None:
+    payment_status = str(st.query_params.get("payment", "")).strip().lower()
+    lang = st.session_state.get("lang", "DE")
+    if payment_status == "success":
+        return (
+            "success",
+            "🎉 Zahlung erfolgreich! Willkommen zurück bei Allocato – dein Upgrade ist jetzt auf dem Weg zu deinem Account."
+            if lang == "DE"
+            else "🎉 Payment successful! Welcome back to Allocato — your upgrade is now on its way to your account.",
+        )
+    if payment_status == "cancel":
+        return (
+            "info",
+            "😌 Alles gut — Checkout abgebrochen. Dein Setup wartet hier entspannt auf dich."
+            if lang == "DE"
+            else "😌 No worries — checkout canceled. Your setup is waiting right here for you.",
+        )
+    return None
 
 
 if "lang" not in st.session_state:
     st.session_state.lang = "DE"
 
+payment_feedback = get_payment_feedback()
+if payment_feedback:
+    level, message = payment_feedback
+    getattr(st, level)(message)
+
 TEXT = {
     "DE": {
         "brand": "🚀 Allocato",
-        "hero_title": "Dein smarter Portfolio-Manager für Direkttaktien.",
+        "hero_title": "🚀 Mehr Drive für dein Portfolio. Weniger Meh.",
         "hero_subtitle": (
-            "Mehr Kontrolle, mehr Transparenz, keine Black-Box. "
+            "Mehr Kontrolle, mehr Transparenz, null Black-Box-Vibes. "
             "Allocato unterstützt dich dabei, Aktienportfolios intelligenter zu strukturieren — "
             "mit dynamischer Gewichtung statt blindem Buy & Hold und Dividenden direkt bei dir."
         ),
@@ -46,13 +80,13 @@ TEXT = {
             "💸 Dividenden direkt beim User",
         ],
         "hero_cta": "🚀 Jetzt kostenlos testen",
-        "hero_note": "Starte direkt mit der echten Allocato-App.",
+        "hero_note": "Direkt rein in die App — kein Umweg, kein Leerlauf, nur mehr Klarheit fürs Depot. ⚡",
         "why_label": "WARUM ALLOCATO?",
-        "why_title": "Mehr als Portfolio-Tracking — ein klares System für bessere Entscheidungen.",
+        "why_title": "Mehr als Tracking — eher dein smarter Co-Pilot fürs Depot.",
         "why_text": (
             "Allocato ist für Anleger gemacht, die ihr Kapital bewusst steuern wollen. "
             "Statt intransparenten Produkten oder starren Standardlösungen bekommst du eine moderne, "
-            "nachvollziehbare Oberfläche für direkte Aktienportfolios mit professionellem Anspruch."
+            "nachvollziehbare Oberfläche für direkte Aktienportfolios mit professionellem Anspruch — klar, fokussiert und angenehm wach."
         ),
         "features": [
             (
@@ -114,10 +148,10 @@ TEXT = {
             ),
         ],
         "pricing_label": "PRICING",
-        "pricing_title": "Vier Modelle. Ein Ziel: mehr Kontrolle über dein Portfolio.",
+        "pricing_title": "Vier Modelle. Ein Ziel: dein Depot cleverer auf Touren bringen.",
         "pricing_text": (
-            "Starte kostenlos oder wähle den Plan, der zu deinem Anspruch passt. "
-            "Alle Modelle sind klar strukturiert und auf echte Nutzung ausgelegt."
+            "Starte kostenlos oder nimm direkt das Setup, das zu deinem Anspruch passt. "
+            "Klar strukturiert, ohne Abo-Nebel und mit genug Power für echte Nutzung."
         ),
         "plans": [
             {
@@ -201,13 +235,13 @@ TEXT = {
             "Simulationen oder Vergleiche sind keine Garantie für zukünftige Entwicklungen. "
             "Jede Anlageentscheidung erfolgt eigenverantwortlich."
         ),
-        "bot_button": "🚀 Jetzt zum Allocato Bot gehen →",
+        "bot_button": "🚀 Zum Allocato Bot rübergleiten →",
     },
     "EN": {
         "brand": "🚀 Allocato",
-        "hero_title": "Your Smart Portfolio Manager for Direct Stocks.",
+        "hero_title": "🚀 More momentum for your portfolio. Less meh.",
         "hero_subtitle": (
-            "More control, more transparency, no black box. "
+            "More control, more transparency, zero black-box vibes. "
             "Allocato helps you structure stock portfolios more intelligently — "
             "with dynamic weighting instead of blind buy & hold and dividends paid directly to you."
         ),
@@ -218,13 +252,13 @@ TEXT = {
             "💸 Dividends Paid Directly",
         ],
         "hero_cta": "🚀 Start for Free",
-        "hero_note": "Launch directly into the live Allocato app.",
+        "hero_note": "Jump straight into the live app — less friction, more clarity, more action. ⚡",
         "why_label": "WHY ALLOCATO?",
-        "why_title": "More than portfolio tracking — a clear system for better decisions.",
+        "why_title": "More than tracking — think of it as a smarter co-pilot for your portfolio.",
         "why_text": (
             "Allocato is built for investors who want to manage their capital consciously. "
             "Instead of opaque products or rigid standard solutions, you get a modern, "
-            "transparent interface for direct stock portfolios with a professional feel."
+            "transparent interface for direct stock portfolios with a professional feel — sharp, focused, and pleasantly alive."
         ),
         "features": [
             (
@@ -282,8 +316,8 @@ TEXT = {
             ),
         ],
         "pricing_label": "PRICING",
-        "pricing_title": "Four plans. One goal: more control over your portfolio.",
-        "pricing_text": "Start for free or choose the plan that matches your needs. All plans are clearly structured and designed for real use.",
+        "pricing_title": "Four plans. One goal: get your portfolio moving smarter.",
+        "pricing_text": "Start free or jump straight into the setup that fits your ambition. Clean structure, no pricing fog, built for real use.",
         "plans": [
             {
                 "name": "Free",
@@ -366,7 +400,7 @@ TEXT = {
             "simulations, or comparisons are not a guarantee of future performance. "
             "All investment decisions remain your own responsibility."
         ),
-        "bot_button": "🚀 Go to the Allocato Bot now →",
+        "bot_button": "🚀 Slide over to the Allocato Bot →",
     },
 }
 
@@ -420,6 +454,7 @@ def render_pricing_card(plan: dict, idx: int):
             if st.button(plan["button"], key=f"plan_{idx}", use_container_width=True, type="primary" if plan["button_kind"] == "primary" else "secondary"):
                 st.switch_page(plan["internal_page"])
         else:
+            prompt_key = f"show_checkout_login_hint_{idx}"
             if st.session_state.get("auth_logged_in", False):
                 st.link_button(
                     plan["button"],
@@ -427,9 +462,17 @@ def render_pricing_card(plan: dict, idx: int):
                     use_container_width=True,
                 )
             else:
-                st.warning(get_checkout_login_required_text())
-                if st.button("Jetzt einloggen / registrieren", key=f"login_redirect_{idx}", use_container_width=True):
-                    st.switch_page("pages/1_Allocato.py")
+                if st.button(plan["button"], key=f"plan_gate_{idx}", use_container_width=True, type="primary" if plan["button_kind"] == "primary" else "secondary"):
+                    st.session_state[prompt_key] = True
+                if st.session_state.get(prompt_key, False):
+                    st.warning(get_checkout_login_required_text())
+                    st.caption(
+                        "💡 Keine Sorge: Ein kurzer Login, dann geht’s sofort weiter zum Checkout."
+                        if st.session_state.get("lang", "DE") == "DE"
+                        else "💡 No worries: quick login first, then it’s straight back to checkout."
+                    )
+                    if st.button(get_login_redirect_button_text(), key=f"login_redirect_{idx}", use_container_width=True):
+                        st.switch_page("pages/1_Allocato.py")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
