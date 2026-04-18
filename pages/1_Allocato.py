@@ -530,7 +530,7 @@ defaults = {
     "cash_interest_pct": 0.00,
     "use_regime_filter": False,
     "show_debug": False,
-    "conviction_power": 2.0,
+    "conviction_power": 1.9,
     "soft_cash_mode": True,
     "target_cash_floor_pct": 1,
     "target_cash_ceiling_pct": 8,
@@ -699,7 +699,7 @@ PRESETS = {
     "Quality": {
         "assets_input": "AAPL\nSAP.DE\nSIE.DE\nALV.DE\nMUV2.DE\nJNJ\nPG",
         "top_n": 4,
-        "conviction_power": 2.0,
+        "conviction_power": 1.9,
         "max_weight_pct": 55,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
@@ -716,7 +716,7 @@ PRESETS = {
             "KO\nPEP\nMCD\nASML\nADBE\nCRM\nNOW"
         ),
         "top_n": 5,
-        "conviction_power": 2.5,
+        "conviction_power": 2.0,
         "max_weight_pct": 55,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
@@ -732,7 +732,7 @@ PRESETS = {
             "DTE.DE\nIFX.DE\nADS.DE\nDPW.DE\nVOW3.DE\nCON.DE\nHEI.DE"
         ),
         "top_n": 5,
-        "conviction_power": 2.2,
+        "conviction_power": 2.0,
         "max_weight_pct": 50,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
@@ -748,7 +748,7 @@ PRESETS = {
             "V\nMA\nJPM\nBAC\nGS\nMS\nC\nAXP\nSPY\nQQQ\nSAP.DE\nSIE.DE\nALV.DE\nMUV2.DE"
         ),
         "top_n": 6,
-        "conviction_power": 2.0,
+        "conviction_power": 1.9,
         "max_weight_pct": 50,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
@@ -1556,8 +1556,9 @@ def build_benchmark_equity_series(benchmark_tickers: list[str], period: str, dat
     dates = pd.Index(dates).sort_values()
     requested_start = dates.min()
 
+    benchmark_cache = load_benchmark_series_bulk(tuple(benchmark_tickers), period) if benchmark_tickers else {}
     for bench in benchmark_tickers:
-        series = _download_with_fallbacks(bench, get_period_metadata(period)["yf_period"])
+        series = benchmark_cache.get(bench, pd.Series(dtype=float))
         if series.empty:
             continue
 
@@ -1909,7 +1910,7 @@ def _download_with_fallbacks(ticker: str, period: str) -> pd.Series:
     return series_map.get(ticker, pd.Series(dtype=float))
 
 
-@st.cache_data(ttl=3600, max_entries=50, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=100, show_spinner=False)
 def _load_close_prices_cached(tickers_tuple, period: str):
     tickers = [str(t).strip() for t in tickers_tuple if str(t).strip()]
     meta = get_period_metadata(period)
@@ -2071,6 +2072,11 @@ def align_price_series(series_map, period: str, min_live_assets: int = 2, ff_lim
 def load_single_close(ticker, period):
     s = _download_with_fallbacks(ticker, get_period_metadata(period)["yf_period"])
     return s
+
+@st.cache_data(ttl=3600, max_entries=100, show_spinner=False)
+def load_benchmark_series_bulk(tickers_tuple, period: str):
+    cached = _load_close_prices_cached(tuple(tickers_tuple), period)
+    return cached.get("series_map", {})
 
 def compute_metrics(equity: pd.Series):
     eq = pd.to_numeric(equity, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().copy()
@@ -2327,30 +2333,30 @@ def get_regime_profile(regime_code: str) -> dict:
     profiles = {
         "BULL": {
             "score_weights": {"trend": 0.24, "momentum": 0.34, "quality": 0.10, "risk": 0.12, "regime_fit": 0.20},
-            "cash_target": 0.00,
-            "min_score": 32.0,
-            "invest_ratio": 1.00,
+            "cash_target": 0.01,
+            "min_score": 26.0,
+            "invest_ratio": 0.99,
             "strategy": "Trend + Breakout Momentum",
         },
         "TRANSITION": {
             "score_weights": {"trend": 0.24, "momentum": 0.20, "quality": 0.22, "risk": 0.18, "regime_fit": 0.16},
-            "cash_target": 0.02,
-            "min_score": 36.0,
-            "invest_ratio": 0.99,
+            "cash_target": 0.03,
+            "min_score": 32.0,
+            "invest_ratio": 0.97,
             "strategy": "Quality + Momentum",
         },
         "BEAR": {
             "score_weights": {"trend": 0.18, "momentum": 0.12, "quality": 0.24, "risk": 0.28, "regime_fit": 0.18},
-            "cash_target": 0.06,
-            "min_score": 38.0,
-            "invest_ratio": 0.94,
+            "cash_target": 0.08,
+            "min_score": 34.0,
+            "invest_ratio": 0.92,
             "strategy": "Defensive Rotation",
         },
         "RECOVERY": {
             "score_weights": {"trend": 0.26, "momentum": 0.26, "quality": 0.14, "risk": 0.12, "regime_fit": 0.22},
-            "cash_target": 0.00,
-            "min_score": 34.0,
-            "invest_ratio": 1.00,
+            "cash_target": 0.02,
+            "min_score": 29.0,
+            "invest_ratio": 0.985,
             "strategy": "Recovery Re-Entry",
         },
     }
@@ -2369,8 +2375,10 @@ def compute_component_score_table(prices: pd.DataFrame, regime_df: pd.DataFrame,
 
     trend_raw = 0.45 * ((prices / sma50) - 1.0) + 0.55 * ((prices / sma200) - 1.0)
     momentum_raw = 0.20 * ret_21 + 0.35 * ret_63 + 0.30 * ret_126 + 0.15 * ret_252
-    quality_raw = 0.35 * pos_days_63 + 0.35 * (ret_252 - vol_penalty * vol_63) + 0.30 * (1.0 + dd_126)
-    risk_raw = -0.55 * vol_63 + 0.45 * dd_126
+    excess_vol = (vol_63 - 0.32).clip(lower=0.0)
+    soft_vol_penalty = vol_penalty * excess_vol * 2.5
+    quality_raw = 0.35 * pos_days_63 + 0.35 * (ret_252 - soft_vol_penalty) + 0.30 * (1.0 + dd_126)
+    risk_raw = -0.35 * excess_vol - 0.10 * vol_63 + 0.55 * dd_126
 
     trend_score = trend_raw.rank(axis=1, pct=True) * 100
     momentum_score = momentum_raw.rank(axis=1, pct=True) * 100
@@ -2472,16 +2480,16 @@ def should_threshold_rebalance(date, regime_code: str, held_assets: list[str], s
         return True, "Regimewechsel"
     for ticker in selected_assets:
         drift = abs(target_weight_map.get(ticker, 0.0) - current_weight_map.get(ticker, 0.0))
-        if drift > 0.08:
-            return True, "Gewichtsdrift > 8%"
+        if drift > 0.18:
+            return True, "Gewichtsdrift > 18%"
     if held_assets:
         held_score = score_today.reindex(held_assets).dropna().mean() if any(t in score_today.index for t in held_assets) else 0.0
         selected_score = score_today.reindex(selected_assets).dropna().mean() if any(t in score_today.index for t in selected_assets) else 0.0
-        if selected_score - held_score > 10:
+        if selected_score - held_score > 22:
             return True, "neues Top-Asset deutlich besser"
     for ticker in held_assets:
         try:
-            if component_scores["trend"].loc[date, ticker] < 35:
+            if component_scores["trend"].loc[date, ticker] < 22:
                 return True, f"Trendbruch {ticker}"
         except Exception:
             pass
@@ -2496,22 +2504,22 @@ def should_skip_sale_for_tax(ticker: str, current_shares: float, target_shares: 
     unrealized_gain_pct = ((price / avg_cost) - 1.0) * 100.0 if avg_cost > 0 else 0.0
     reduction_ratio = (current_shares - target_shares) / current_shares if current_shares > 0 else 0.0
     estimated_tax_drag_pct = max(unrealized_gain_pct, 0.0) * 0.26375 * reduction_ratio
-    return estimated_tax_drag_pct > 4.0 and regime_code in {"BULL", "RECOVERY", "TRANSITION"}
+    return estimated_tax_drag_pct > 6.0 and regime_code in {"BULL", "RECOVERY", "TRANSITION"}
 
     if last_regime_code is not None and regime_code != last_regime_code:
         return True, "Regimewechsel"
     for ticker in selected_assets:
         drift = abs(target_weight_map.get(ticker, 0.0) - current_weight_map.get(ticker, 0.0))
-        if drift > 0.08:
-            return True, "Gewichtsdrift > 8%"
+        if drift > 0.18:
+            return True, "Gewichtsdrift > 18%"
     if held_assets:
         held_score = score_today.reindex(held_assets).dropna().mean() if any(t in score_today.index for t in held_assets) else 0.0
         selected_score = score_today.reindex(selected_assets).dropna().mean() if any(t in score_today.index for t in selected_assets) else 0.0
-        if selected_score - held_score > 10:
+        if selected_score - held_score > 22:
             return True, "neues Top-Asset deutlich besser"
     for ticker in held_assets:
         try:
-            if component_scores["trend"].loc[date, ticker] < 35:
+            if component_scores["trend"].loc[date, ticker] < 22:
                 return True, f"Trendbruch {ticker}"
         except Exception:
             pass
@@ -2529,17 +2537,17 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
     momentum_today = component_scores["momentum"].loc[date].reindex(available).fillna(50)
     regime_fit_today = component_scores["regime_fit"].loc[date].reindex(available).fillna(50)
 
-    dynamic_floor = max(min_score_user * 100, profile["min_score"] - 8.0)
+    dynamic_floor = max(min_score_user * 100, profile["min_score"] - 10.0)
 
     if regime_code == "BULL":
-        eligible = score_today[(trend_today.reindex(score_today.index) >= 42) & (momentum_today.reindex(score_today.index) >= 45)]
-        eligible = eligible + regime_fit_today.reindex(eligible.index).fillna(50) * 0.03
+        eligible = score_today[(trend_today.reindex(score_today.index) >= 36) & (momentum_today.reindex(score_today.index) >= 40)]
+        eligible = eligible + regime_fit_today.reindex(eligible.index).fillna(50) * 0.05 + quality_today.reindex(eligible.index).fillna(50) * 0.02
     elif regime_code == "TRANSITION":
-        eligible = score_today[(quality_today.reindex(score_today.index) >= 38) & (risk_today.reindex(score_today.index) >= 35)]
+        eligible = score_today[(quality_today.reindex(score_today.index) >= 34) & (risk_today.reindex(score_today.index) >= 30)]
     elif regime_code == "BEAR":
-        eligible = score_today[(risk_today.reindex(score_today.index) >= 32) & (quality_today.reindex(score_today.index) >= 35)]
+        eligible = score_today[(risk_today.reindex(score_today.index) >= 28) & (quality_today.reindex(score_today.index) >= 32)]
     else:
-        eligible = score_today[(trend_today.reindex(score_today.index) >= 38) & (momentum_today.reindex(score_today.index) >= 40)]
+        eligible = score_today[(trend_today.reindex(score_today.index) >= 34) & (momentum_today.reindex(score_today.index) >= 36)]
 
     eligible = eligible[eligible >= dynamic_floor]
 
@@ -2562,7 +2570,7 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
                 "cash_target": min(max(cash_floor, profile["cash_target"]), cash_ceiling),
             }
         shifted = fallback - fallback.min() + 1e-6
-        weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.1, conviction_power - 0.2))
+        weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.15, conviction_power - 0.1))
         invest_ratio = profile["invest_ratio"] if regime_code in {"BULL", "RECOVERY"} else min(profile["invest_ratio"], soft_invest_ratio if soft_cash_mode else profile["invest_ratio"])
         return {
             "selected": fallback,
@@ -2741,7 +2749,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
             component_scores=component_scores,
             last_regime_code=last_regime_code,
         )
-        do_rebalance = scheduled_rebalance or threshold_trigger or need_fresh_strategy
+        do_rebalance = scheduled_rebalance or threshold_trigger or (i == 0) or (regime_code_today != last_regime_code and i > 0)
 
         if do_rebalance:
             turnover = float(np.nansum(np.abs(target_values - current_values_np)))
