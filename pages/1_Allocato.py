@@ -47,15 +47,19 @@ ADMIN_EMAILS = {
     "admin@allocato.local",
 }
 
-# Direkte Test-Freischaltungen pro E-Mail.
-# Beispiel:
-# TEST_ACCOUNT_TIER_OVERRIDES = {
-#     "kev_cone@web.de": "Pro",
-#     "zweite@email.de": "Lifetime",
-# }
-TEST_ACCOUNT_TIER_OVERRIDES = {
-    "rinexghg@gmail.com": "Lifetime",
+# =========================
+# BETA / WHITELIST für Lifetime (einfach hier E-Mails hinzufügen)
+# =========================
+LIFETIME_WHITELIST = {
+    "rinexghg@gmail.com",           # du
+    "shima.babachahi@yahoo.com",    # neuer Beta-Tester (Shima)
+    # Hier weitere Beta-Tester hinzufügen:
+    # "max.mustermann@gmail.com",
+    # "anna.beispiel@web.de",
 }
+
+# Optionale Einzel-Overrides für Tests außerhalb der Whitelist
+TEST_ACCOUNT_TIER_OVERRIDES = {}
 
 ALLOW_ADMIN_TIER_OVERRIDE = True
 
@@ -152,18 +156,35 @@ def ensure_auth_session_state():
 def normalize_email(email: str) -> str:
     return email.strip().lower()
 
+def is_lifetime_whitelisted(email: str) -> bool:
+    if not email:
+        return False
+    return normalize_email(email) in LIFETIME_WHITELIST
+
 def get_test_override_tier(email: str) -> str | None:
     normalized = normalize_email(email)
     tier = TEST_ACCOUNT_TIER_OVERRIDES.get(normalized)
     return tier if tier in TIERS else None
 
 def resolve_effective_tier(email: str | None, stored_tier: str | None = None) -> str:
-    email_normalized = normalize_email(email) if email else ""
-    override_tier = get_test_override_tier(email_normalized) if email_normalized else None
+    if not email:
+        return stored_tier if stored_tier in TIERS else "Free"
+
+    normalized = normalize_email(email)
+
+    # 1. Whitelist hat Vorrang (Beta-Tester / wichtige Leute)
+    if is_lifetime_whitelisted(normalized):
+        return "Lifetime"
+
+    # 2. Test-Account-Override (falls du noch einzelne Tests brauchst)
+    override_tier = get_test_override_tier(normalized)
     if override_tier:
         return override_tier
+
+    # 3. Normaler gespeicherter Tier
     if stored_tier in TIERS:
         return stored_tier
+
     return "Free"
 
 def is_valid_email(email: str) -> bool:
