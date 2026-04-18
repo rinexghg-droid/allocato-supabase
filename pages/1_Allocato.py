@@ -21,6 +21,10 @@ STRIPE_BASIC = "https://buy.stripe.com/fZu9AN2mIeJu3oRbNcfjG02"
 STRIPE_PRO = "https://buy.stripe.com/3cIaERf9udFq2kN04ufjG01"
 STRIPE_LIFETIME = "https://buy.stripe.com/8x2dR37H21WI4sV3gGfjG00"
 
+APP_BASE_URL = "https://allocato-finance.streamlit.app"
+LANDING_PUBLIC_URL = APP_BASE_URL
+BOT_PUBLIC_URL = f"{APP_BASE_URL}/Allocato"
+
 # =========================
 # User / Auth System (Supabase)
 # =========================
@@ -63,8 +67,11 @@ def build_checkout_url(base_url: str) -> str:
 
 def get_checkout_login_required_text(lang: str) -> str:
     if lang == "EN":
-        return "Please log in or register first so your purchase can be assigned correctly to your account."
-    return "Bitte erst einloggen oder registrieren, damit dein Kauf korrekt deinem Account zugeordnet werden kann."
+        return "🚀 Almost there — please log in or register first so your upgrade lands on the right Allocato account."
+    return "🚀 Fast da – logge dich bitte erst ein oder registriere dich, damit dein Upgrade sauber beim richtigen Allocato-Account landet."
+
+def get_login_redirect_button_text(lang: str) -> str:
+    return "✨ Log in / register now" if lang == "EN" else "✨ Jetzt einloggen / registrieren"
 
 
 def ensure_auth_session_state():
@@ -222,7 +229,7 @@ def get_auth_texts(lang: str) -> dict:
     if lang == "EN":
         return {
             "account_header": "👤 Account",
-            "guest_info": "You are using Allocato as a guest. To save baskets and your plan permanently, please register or log in.",
+            "guest_info": "You are cruising through Allocato as a guest right now. Log in or register to save baskets, upgrades and your setup permanently.",
             "login_tab": "Login",
             "register_tab": "Register",
             "email": "Email",
@@ -239,11 +246,11 @@ def get_auth_texts(lang: str) -> dict:
             "plan_saved": "Plan saved.",
             "register_pw_mismatch": "Passwords do not match.",
             "auth_required_export": "Please log in and upgrade to use these exports permanently.",
-            "stripe_note": "The Stripe checkout links are included. Automatic plan upgrade after payment still requires a Stripe webhook or a server endpoint.",
+            "stripe_note": "💳 Checkout is ready. Payments are linked to your account automatically once the webhook gives the green light.",
         }
     return {
         "account_header": "👤 Konto",
-        "guest_info": "Du nutzt Allocato aktuell als Gast. Für dauerhaft gespeicherte Körbe und Abo-Stufen bitte registrieren oder einloggen.",
+        "guest_info": "Du surfst gerade als Gast durch Allocato. Logge dich ein oder registriere dich, damit Körbe, Upgrades und dein Setup dauerhaft gespeichert bleiben.",
         "login_tab": "Login",
         "register_tab": "Registrieren",
         "email": "E-Mail",
@@ -260,10 +267,35 @@ def get_auth_texts(lang: str) -> dict:
         "plan_saved": "Plan gespeichert.",
         "register_pw_mismatch": "Die Passwörter stimmen nicht überein.",
         "auth_required_export": "Bitte logge dich ein und upgrade deinen Account, um diese Exporte dauerhaft zu nutzen.",
-        "stripe_note": "Die Stripe-Checkout-Links sind eingebaut. Für eine automatische Planfreischaltung nach Zahlung brauchst du zusätzlich noch einen Stripe-Webhook oder Server-Endpunkt.",
+        "stripe_note": "💳 Checkout ist bereit. Zahlungen werden deinem Account automatisch sauber zugeordnet, sobald der Webhook grünes Licht gibt.",
     }
 
 ensure_auth_session_state()
+
+def maybe_handle_payment_query(lang: str):
+    payment_status = str(st.query_params.get("payment", "")).strip().lower()
+    marker = f"{payment_status}:{st.session_state.get('auth_user_email', 'guest')}"
+    if not payment_status or st.session_state.get("_last_payment_marker") == marker:
+        return
+
+    if payment_status == "success":
+        if st.session_state.get("auth_logged_in"):
+            st.session_state["auth_loaded_for"] = ""
+            load_logged_in_user_state()
+            enforce_plan_limits()
+        st.success(
+            "🎉 Zahlung erfolgreich! Dein Upgrade wurde zurück in Allocato eskortiert."
+            if lang == "DE"
+            else "🎉 Payment successful! Your upgrade has been escorted back into Allocato."
+        )
+    elif payment_status == "cancel":
+        st.info(
+            "😌 Checkout abgebrochen. Alles gut — dein Depot wartet geduldig auf die nächste Runde."
+            if lang == "DE"
+            else "😌 Checkout canceled. No worries — your portfolio is patiently waiting for the next round."
+        )
+
+    st.session_state["_last_payment_marker"] = marker
 
 
 # =========================
@@ -452,6 +484,7 @@ def enforce_plan_limits():
 
 load_logged_in_user_state()
 enforce_plan_limits()
+maybe_handle_payment_query(st.session_state.get("language", "DE"))
 
 # =========================
 # Presets
@@ -599,14 +632,14 @@ ASSET_CATALOG_DF = pd.DataFrame(ASSET_CATALOG).drop_duplicates(subset=["ticker"]
 # =========================
 TRANSLATIONS = {
     "DE": {
-        "page_badges": ["Dynamic Allocation", "Direct Equity Ownership", "Buy & Hold Benchmark", "Launch Version 5.2.0"],
+        "page_badges": ["Dynamic Allocation ⚡", "Direct Equity Ownership 💎", "Buy & Hold Benchmark 📊", "Launch Version 5.2.0 🚀"],
         "hero_sub": (
             "Dein smarter Portfolio-Manager für Direktaktien. "
             "Nicht blind kaufen. Nicht unnötig Gebühren zahlen. "
             "Nicht darauf hoffen, dass irgendein Produkt schon irgendwie passt."
             "<br><br>"
             "Allocato hilft dir, ein dynamisch gesteuertes Portfolio aufzubauen, "
-            "in dem du <b>Kontrolle, Transparenz und Dividenden direkt selbst</b> behältst."
+            "in dem du <b>Kontrolle, Transparenz und Dividenden direkt selbst</b> behältst — mit etwas mehr Biss und deutlich weniger Excel-Müdigkeit."
         ),
         "warning_expander": "⚠️ Wichtiger Hinweis",
         "warning_text": (
@@ -848,7 +881,7 @@ TRANSLATIONS = {
         "debug_regime": "Regime-Filter aktiv:",
         "debug_last_prices": "Letzte Preise:",
         "debug_last_scores": "Letzte Scores:",
-        "info_start": "👈 Wähle ein Setup oder gib deinen Asset-Korb ein und klicke auf 'Portfolio berechnen'.",
+        "info_start": "👈 Wähle ein Setup oder wirf deinen Asset-Korb rein — dann einmal auf 'Portfolio berechnen' und Allocato legt los.",
         "date_col": "Datum",
         "regime_ok_col": "Regime OK",
         "selected_assets_col": "Ausgewählte Assets",
@@ -868,17 +901,17 @@ TRANSLATIONS = {
         "added_all_assets_msg": "{count} Assets wurden zum Asset-Korb hinzugefügt.",
         "removed_asset_msg": "{ticker} wurde aus dem Asset-Korb entfernt.",
         "remove_empty_msg": "Es ist kein Asset zum Entfernen vorhanden.",
-        "footer_free": "🆓 Free-Version • Upgrade für unbegrenzte Körbe, 5 Jahre Historie und Asset-Suche",
+        "footer_free": "🆓 Free-Version • Upgrade für unbegrenzte Körbe, 5 Jahre Historie und Asset-Suche — wenn dein Depot nach mehr Power ruft.",
     },
     "EN": {
-        "page_badges": ["Dynamic Allocation", "Direct Equity Ownership", "Buy & Hold Benchmark", "Launch Version 5.2.0"],
+        "page_badges": ["Dynamic Allocation ⚡", "Direct Equity Ownership 💎", "Buy & Hold Benchmark 📊", "Launch Version 5.2.0 🚀"],
         "hero_sub": (
             "Your smart portfolio manager for direct equities. "
             "Do not buy blindly. Do not pay unnecessary fees. "
             "Do not just hope that some product somehow fits."
             "<br><br>"
             "Allocato helps you build a dynamically managed portfolio "
-            "where you keep <b>control, transparency and dividends directly</b>."
+            "where you keep <b>control, transparency and dividends directly</b> — with more edge and a lot less spreadsheet fatigue."
         ),
         "warning_expander": "⚠️ Important notice",
         "warning_text": (
@@ -1120,7 +1153,7 @@ TRANSLATIONS = {
         "debug_regime": "Regime filter active:",
         "debug_last_prices": "Latest prices:",
         "debug_last_scores": "Latest scores:",
-        "info_start": "👈 Choose a setup or enter your asset basket and click 'Calculate portfolio'.",
+        "info_start": "👈 Pick a setup or drop in your asset basket — then hit 'Calculate portfolio' and let Allocato cook.",
         "date_col": "Date",
         "regime_ok_col": "Regime OK",
         "selected_assets_col": "Selected assets",
@@ -1140,7 +1173,7 @@ TRANSLATIONS = {
         "added_all_assets_msg": "{count} assets were added to the asset basket.",
         "removed_asset_msg": "{ticker} was removed from the asset basket.",
         "remove_empty_msg": "There is no asset available to remove.",
-        "footer_free": "🆓 Free plan • Upgrade for unlimited baskets, 5 years of history and asset search",
+        "footer_free": "🆓 Free plan • Upgrade for unlimited baskets, 5 years of history and asset search — when your portfolio wants more firepower.",
     },
 }
 
@@ -1515,6 +1548,7 @@ else:
                 ok, message = create_user(reg_email, reg_password)
                 if ok:
                     st.sidebar.success(message)
+                    st.rerun()
                 else:
                     st.sidebar.error(message)
 
@@ -1541,25 +1575,33 @@ with upgrade_col_1:
     if st.session_state.get("auth_logged_in", False):
         st.link_button("Basic", build_checkout_url(STRIPE_BASIC), use_container_width=True)
     else:
-        st.warning(get_checkout_login_required_text(lang))
-        if st.button("Jetzt einloggen / registrieren", key="login_redirect_basic", use_container_width=True):
-            st.switch_page("pages/1_Allocato.py")
+        if st.button("Basic", key="upgrade_basic_gate", use_container_width=True):
+            st.session_state["sidebar_upgrade_prompt_plan"] = "Basic"
 
 with upgrade_col_2:
     if st.session_state.get("auth_logged_in", False):
         st.link_button("Pro", build_checkout_url(STRIPE_PRO), use_container_width=True)
     else:
-        st.warning(get_checkout_login_required_text(lang))
-        if st.button("Jetzt einloggen / registrieren", key="login_redirect_pro", use_container_width=True):
-            st.switch_page("pages/1_Allocato.py")
+        if st.button("Pro", key="upgrade_pro_gate", use_container_width=True):
+            st.session_state["sidebar_upgrade_prompt_plan"] = "Pro"
 
 with upgrade_col_3:
     if st.session_state.get("auth_logged_in", False):
         st.link_button("Lifetime", build_checkout_url(STRIPE_LIFETIME), use_container_width=True)
     else:
-        st.warning(get_checkout_login_required_text(lang))
-        if st.button("Jetzt einloggen / registrieren", key="login_redirect_lifetime", use_container_width=True):
-            st.switch_page("pages/1_Allocato.py")
+        if st.button("Lifetime", key="upgrade_lifetime_gate", use_container_width=True):
+            st.session_state["sidebar_upgrade_prompt_plan"] = "Lifetime"
+
+if (not st.session_state.get("auth_logged_in", False)) and st.session_state.get("sidebar_upgrade_prompt_plan"):
+    chosen_plan = st.session_state.get("sidebar_upgrade_prompt_plan")
+    st.sidebar.warning(get_checkout_login_required_text(lang))
+    st.sidebar.caption(
+        f"✨ {chosen_plan} wartet schon auf dich — einmal kurz einloggen, dann geht’s direkt weiter zum Checkout."
+        if lang == "DE"
+        else f"✨ {chosen_plan} is already waiting for you — quick login first, then it’s straight to checkout."
+    )
+    if st.sidebar.button(get_login_redirect_button_text(lang), key="sidebar_login_redirect", use_container_width=True):
+        st.switch_page("pages/1_Allocato.py")
 
 st.sidebar.caption(AUTH_T["stripe_note"])
 
