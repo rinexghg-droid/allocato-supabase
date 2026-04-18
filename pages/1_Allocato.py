@@ -4131,6 +4131,9 @@ period_options = ["1y", "2y", "3y"] if tier == "Free" else ["1y", "2y", "3y", "5
 if st.session_state.period not in period_options:
     st.session_state.period = "3y" if tier == "Free" else "5y"
 
+pre_period_asset_count = len([x.strip() for x in str(st.session_state.get("assets_input", "")).splitlines() if x.strip()])
+auto_adjust_period_for_large_baskets(pre_period_asset_count, tier)
+
 period = st.sidebar.selectbox(
     T["period"],
     period_options,
@@ -4404,7 +4407,6 @@ save_logged_in_user_state()
 
 input_tickers = [x.strip() for x in assets_input.splitlines() if x.strip()]
 asset_count = len(input_tickers)
-auto_adjust_period_for_large_baskets(asset_count, tier)
 period = st.session_state.get("period", period)
 max_assets = max(1, asset_count)
 current_top_n = int(st.session_state.get("top_n", 1))
