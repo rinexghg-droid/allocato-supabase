@@ -1804,7 +1804,7 @@ def stabilize_equity_series(
 
         out.iloc[i] = next_val
 
-    return out.fillna(method="ffill").fillna(0.0)
+    return out.ffill().fillna(0.0)
 
 def safe_portfolio_cap(initial_capital: float, monthly_savings: float, periods: int) -> float:
     total_contrib = float(initial_capital) + max(0, periods) * float(monthly_savings)
@@ -2794,7 +2794,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
 
     flows = build_flow_series(dates, initial_capital=float(initial_capital), monthly_savings=float(monthly_savings))
     equity_bot = stabilize_equity_series(equity_bot_raw, flows, equity_cap=portfolio_cap)
-    cash_bot = cash_bot_raw.clip(lower=0.0, upper=portfolio_cap).fillna(method="ffill").fillna(0.0)
+    cash_bot = cash_bot_raw.clip(lower=0.0, upper=portfolio_cap).ffill().fillna(0.0)
     cash_bot = np.minimum(cash_bot.values, equity_bot.values)
     cash_bot = pd.Series(cash_bot, index=dates, dtype=float)
     invested_bot = (equity_bot - cash_bot).clip(lower=0.0, upper=portfolio_cap)
