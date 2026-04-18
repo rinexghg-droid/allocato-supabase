@@ -1,3 +1,4 @@
+# WICHTIG: Für diesen Code muss `plotly` in requirements.txt ergänzt werden, z. B. mit: plotly
 import json
 import hmac
 import hashlib
@@ -139,6 +140,7 @@ def ensure_auth_session_state():
         "auth_loaded_for": "",
         "auth_is_admin": False,
         "cancel_subscription_confirmed": False,
+        "last_calc_results": None,
     }
     for key, value in auth_defaults.items():
         if key not in st.session_state:
@@ -1004,6 +1006,10 @@ TRANSLATIONS = {
         "warning_align_reduced": "Die gemeinsame Historie wurde automatisch bereinigt, damit der Vergleich stabil bleibt.",
         "metric_paid_in": "Kumulative Einzahlungen",
         "equity_label_paid_in": "Kumulative Einzahlungen",
+        "annual_returns_title": "📅 Jährliche Renditen",
+        "annual_returns_year": "Jahr",
+        "annual_returns_bot": "Bot %",
+        "annual_returns_bh": "Buy & Hold %",
         "rebal_buys_col": "Käufe",
         "rebal_sells_col": "Verkäufe",
         "rebal_reason_col": "Logik",
@@ -1288,6 +1294,10 @@ TRANSLATIONS = {
         "warning_align_reduced": "The common history was cleaned automatically to keep the comparison stable.",
         "metric_paid_in": "Cumulative contributions",
         "equity_label_paid_in": "Cumulative contributions",
+        "annual_returns_title": "📅 Annual returns",
+        "annual_returns_year": "Year",
+        "annual_returns_bot": "Bot %",
+        "annual_returns_bh": "Buy & Hold %",
         "rebal_buys_col": "Buys",
         "rebal_sells_col": "Sells",
         "rebal_reason_col": "Logic",
@@ -1760,6 +1770,300 @@ def simplify_weight_chart(weights_with_cash: pd.DataFrame, top_k: int, other_lab
 def make_export_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
+def compute_annual_returns(bot_equity: pd.Series, bh_equity: pd.Series, T: dict) -> pd.DataFrame:
+    annual_bot = bot_equity.resample("YE").last().pct_change() * 100
+    annual_bh = bh_equity.resample("YE").last().pct_change() * 100
+    df = pd.DataFrame({
+        T["annual_returns_year"]: annual_bot.index.year,
+        T["annual_returns_bot"]: annual_bot.values,
+        T["annual_returns_bh"]: annual_bh.reindex(annual_bot.index).values,
+    }).dropna(how="all")
+    return df.reset_index(drop=True)
+
+def style_rebalance_log(df: pd.DataFrame, buys_col: str, sells_col: str):
+    def _cell_color(val: str, positive: bool):
+        if not isinstance(val, str) or val.strip() in {"", "—"}:
+            return ""
+        bg = "rgba(34,197,94,0.16)" if positive else "rgba(239,68,68,0.16)"
+        border = "#22c55e" if positive else "#ef4444"
+        color = "#dcfce7" if positive else "#fee2e2"
+        return f"background-color: {bg}; color: {color}; border-left: 3px solid {border};"
+    return df.style.applymap(lambda v: _cell_color(v, True), subset=[buys_col]).applymap(lambda v: _cell_color(v, False), subset=[sells_col])
+
+def render_calculation_results(context, T, lang, tier):
+    bot_metrics = context["bot_metrics"]
+    bh_metrics = context["bh_metrics"]
+    exposure = context["exposure"]
+    avg_cash_quote = context["avg_cash_quote"]
+    outperformance_pp = context["outperformance_pp"]
+    trade_count = context["trade_count"]
+    conviction_power = context["conviction_power"]
+    soft_cash_mode = context["soft_cash_mode"]
+    target_cash_floor_pct = context["target_cash_floor_pct"]
+    target_cash_ceiling_pct = context["target_cash_ceiling_pct"]
+    equity_bot = context["equity_bot"]
+    equity_bh = context["equity_bh"]
+    cumulative_contributions = context["cumulative_contributions"]
+    cash_bot = context["cash_bot"]
+    invested_bot = context["invested_bot"]
+    rebalance_df = context["rebalance_df"]
+    weights_with_cash = context["weights_with_cash"]
+    weights_chart_df = context["weights_chart_df"]
+    weights_df = context["weights_df"]
+    selected_assets_log = context["selected_assets_log"]
+    target_weights_log = context["target_weights_log"]
+    weights_rebalance_only = context["weights_rebalance_only"]
+    show_debug = context["show_debug"]
+    tickers = context["tickers"]
+    skipped_tickers = context["skipped_tickers"]
+    top_n = context["top_n"]
+    effective_top_n = context["effective_top_n"]
+    max_weight_pct = context["max_weight_pct"]
+    use_regime_filter = context["use_regime_filter"]
+    prices = context["prices"]
+    raw_score = context["raw_score"]
+    annual_returns_df = compute_annual_returns(equity_bot, equity_bh, T)
+
+    # Status
+    if outperformance_pp > 0:
+        st.success(T["status_success"])
+    elif outperformance_pp > -10:
+        st.info(T["status_neutral"])
+    else:
+        st.warning(T["status_bad"])
+    
+    if avg_cash_quote > 15:
+        st.info(T["cash_high"])
+    elif avg_cash_quote < 5:
+        st.info(T["cash_low"])
+    
+    # Metrics
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(T["metric_bot_end"], f"{equity_bot.iloc[-1]:,.2f} €")
+    c2.metric(T["metric_bh_end"], f"{equity_bh.iloc[-1]:,.2f} €")
+    c3.metric(T["metric_outperf"], f"{outperformance_pp:.2f} pp")
+    c4.metric(T["metric_trades"], f"{trade_count}")
+    
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric(T["metric_paid_in"], f"{cumulative_contributions.iloc[-1]:,.2f} €")
+    c6.metric(T["metric_bh_return"], f"{bh_metrics['total_return']:.2f}%")
+    c7.metric(T["metric_exposure"], f"{exposure:.1f}%")
+    c8.metric(T["metric_cash"], f"{avg_cash_quote:.1f}%")
+    
+    c9, c10, c11, c12, c13 = st.columns(5)
+    c9.metric(T["metric_bot_return"], f"{bot_metrics['total_return']:.2f}%")
+    c10.metric(T["metric_cagr"], f"{bot_metrics['cagr']:.2f}%")
+    c11.metric(T["metric_dd"], f"{bot_metrics['max_dd']:.2f}%")
+    c12.metric(T["metric_vol"], f"{bot_metrics['volatility']:.2f}%")
+    c13.metric(T["metric_sharpe"], f"{bot_metrics['sharpe']:.2f}")
+    
+    st.success(T["end_capital_success"].format(value=f"{equity_bot.iloc[-1]:,.2f} €"))
+    
+    # Equity chart
+    equity_fig = go.Figure()
+    equity_fig.add_trace(
+        go.Scatter(
+            x=equity_bot.index,
+            y=equity_bot.values,
+            mode="lines",
+            name=T["equity_label_bot"],
+            line=dict(width=3),
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_bot"] + "</extra>",
+        )
+    )
+    equity_fig.add_trace(
+        go.Scatter(
+            x=equity_bh.index,
+            y=equity_bh.values,
+            mode="lines",
+            name=T["equity_label_bh"],
+            line=dict(width=2, dash="dash"),
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_bh"] + "</extra>",
+        )
+    )
+    equity_fig.add_trace(
+        go.Scatter(
+            x=cumulative_contributions.index,
+            y=cumulative_contributions.values,
+            mode="lines",
+            name=T["equity_label_paid_in"],
+            line=dict(width=2, dash="dot", color="gray"),
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_paid_in"] + "</extra>",
+        )
+    )
+    equity_fig.update_layout(
+        title=T["equity_title"],
+        template="plotly_dark",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        margin=dict(l=20, r=20, t=60, b=20),
+        xaxis_title="",
+        yaxis_title="€",
+    )
+    st.plotly_chart(equity_fig, use_container_width=True)
+    
+    # Export
+    st.markdown(f"### {T['export_title']}")
+    st.caption(T["export_caption"])
+    
+    export_equity_df = pd.DataFrame({
+        T["date_col"]: equity_bot.index,
+        T["bot_portfolio_label"]: equity_bot.values,
+        T["buy_hold_label"]: equity_bh.values,
+        T["equity_label_paid_in"]: cumulative_contributions.values,
+        T["bh_cash_label"]: cash_bot.values,
+        T["invested_label"]: invested_bot.values,
+    })
+    
+    equity_csv = make_export_csv(export_equity_df)
+    rebal_csv = make_export_csv(rebalance_df) if not rebalance_df.empty else b""
+    weights_csv = make_export_csv(
+        weights_with_cash.reset_index().rename(columns={"index": T["date_col"]})
+    )
+    
+    col_exp1, col_exp2, col_exp3 = st.columns(3)
+    
+    col_exp1.download_button(
+        label=T["export_equity"],
+        data=equity_csv,
+        file_name="allocato_equity_curve.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    
+    if tier == "Free":
+        col_exp2.caption(T["export_locked"])
+        col_exp3.caption(T["export_locked"])
+    else:
+        col_exp2.download_button(
+            label=T["export_rebal"],
+            data=rebal_csv,
+            file_name="allocato_rebalancing_log.csv",
+            mime="text/csv",
+            disabled=rebalance_df.empty,
+            use_container_width=True,
+        )
+        col_exp3.download_button(
+            label=T["export_weights"],
+            data=weights_csv,
+            file_name="allocato_weight_history.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    
+    with st.expander(T["interpret_expander"]):
+        st.markdown(
+            T["interpret_text"].format(
+                outperformance=outperformance_pp,
+                exposure=exposure,
+                cash=avg_cash_quote,
+                trades=trade_count,
+                conviction=conviction_power,
+                soft_cash=T["soft_cash_on"] if soft_cash_mode else T["soft_cash_off"],
+                cash_floor=target_cash_floor_pct,
+                cash_ceiling=target_cash_ceiling_pct,
+            )
+        )
+        st.markdown(f"### {T['interpret_why_title']}")
+        st.markdown(T["interpret_why_text"])
+    
+    with st.expander(T["annual_returns_title"], expanded=False):
+        if not annual_returns_df.empty:
+            st.dataframe(annual_returns_df.style.format({T["annual_returns_bot"]: "{:.2f}", T["annual_returns_bh"]: "{:.2f}"}), use_container_width=True)
+
+    st.subheader(T["current_weights"])
+    active_weights_df = weights_df[weights_df[T["weights_current_col"]] > 0].copy()
+    if not active_weights_df.empty:
+        st.dataframe(active_weights_df.round(2), use_container_width=True)
+    else:
+        st.info(T["active_positions_empty"])
+    
+    with st.expander(T["show_all_assets"]):
+        st.dataframe(weights_df.round(2), use_container_width=True)
+    
+    st.subheader(T["weights_chart_title"])
+    st.caption(T["weights_chart_caption"])
+    
+    weights_plot_df = weights_chart_df.copy()
+    weights_fig = go.Figure()
+    
+    for col in weights_plot_df.columns:
+        weights_fig.add_trace(
+            go.Scatter(
+                x=weights_plot_df.index,
+                y=weights_plot_df[col],
+                mode="lines",
+                name=col,
+                stackgroup="one",
+                groupnorm="",
+                hovertemplate="%{x|%Y-%m-%d}<br>" + col + ": %{y:.2f}%<extra></extra>",
+            )
+        )
+    
+    weights_fig.update_layout(
+        title=T["weights_chart_inner_title"],
+        template="plotly_dark",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        margin=dict(l=20, r=20, t=60, b=20),
+        xaxis_title="",
+        yaxis_title=T["weights_chart_ylabel"],
+    )
+    weights_fig.update_yaxes(range=[0, 100], ticksuffix="%")
+    st.plotly_chart(weights_fig, use_container_width=True)
+    
+    with st.expander(T["latest_selection"]):
+        if selected_assets_log:
+            last_selection_date = max(selected_assets_log.keys())
+            st.write(T["last_selection_date"].format(date=last_selection_date.date()))
+            st.write(selected_assets_log[last_selection_date])
+    
+            st.write(T["last_target_weights"])
+            last_weights = target_weights_log.get(last_selection_date, {})
+            if last_weights:
+                last_weights_df = pd.DataFrame({
+                    T["weights_ticker_col"]: list(last_weights.keys()),
+                    T["weights_target_col"]: [v * 100 for v in last_weights.values()],
+                }).sort_values(T["weights_target_col"], ascending=False)
+                st.dataframe(last_weights_df.round(2), use_container_width=True)
+            else:
+                st.write(T["no_positions_selected"])
+        else:
+            st.write(T["no_selection_yet"])
+    
+    with st.expander(T["weights_table"]):
+        st.dataframe(weights_with_cash.round(2), use_container_width=True)
+    
+    with st.expander(T["weights_rebalance"]):
+        if not weights_rebalance_only.empty:
+            st.dataframe(weights_rebalance_only.round(2), use_container_width=True)
+        else:
+            st.write(T["weights_rebalance_empty"])
+    
+    with st.expander(T["rebal_log"]):
+        if not rebalance_df.empty:
+            display_rebal_df = rebalance_df.copy()
+            numeric_cols = display_rebal_df.select_dtypes(include=[np.number]).columns
+            display_rebal_df[numeric_cols] = display_rebal_df[numeric_cols].round(2)
+            st.dataframe(style_rebalance_log(display_rebal_df, T["rebal_buys_col"], T["rebal_sells_col"]), use_container_width=True)
+        else:
+            st.write(T["rebal_log_empty"])
+    
+    if show_debug:
+        with st.expander(T["debug_expander"]):
+            st.write(T["debug_used_tickers"], tickers)
+            st.write(T["debug_skipped"], skipped_tickers)
+            st.write(T["debug_top_n"], top_n)
+            st.write(T["debug_top_n_effective"], effective_top_n)
+            st.write(T["debug_max_weight"], max_weight_pct)
+            st.write(T["debug_conviction"], conviction_power)
+            st.write(T["debug_soft_cash"], soft_cash_mode)
+            st.write(T["debug_regime"], use_regime_filter)
+            st.write(T["debug_last_prices"])
+            st.dataframe(prices.tail(), use_container_width=True)
+            st.write(T["debug_last_scores"])
+            st.dataframe(raw_score.tail(), use_container_width=True)
+    
 # =========================
 # Apply preset / language
 # =========================
@@ -2521,7 +2825,8 @@ with st.expander(T["preset_expander"]):
 # =========================
 # Main
 # =========================
-if st.sidebar.button(T["calculate"], type="primary"):
+calculate_clicked = st.sidebar.button(T["calculate"], type="primary")
+if calculate_clicked:
     save_active_basket_to_state()
 
     with st.spinner(T["spinner"]):
@@ -2829,244 +3134,45 @@ if st.sidebar.button(T["calculate"], type="primary"):
             weights_with_cash.index.intersection(rebalance_dates)
         ].copy()
 
-        # Status
-        if outperformance_pp > 0:
-            st.success(T["status_success"])
-        elif outperformance_pp > -10:
-            st.info(T["status_neutral"])
-        else:
-            st.warning(T["status_bad"])
-
-        if avg_cash_quote > 15:
-            st.info(T["cash_high"])
-        elif avg_cash_quote < 5:
-            st.info(T["cash_low"])
-
-        # Metrics
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric(T["metric_bot_end"], f"{equity_bot.iloc[-1]:,.2f} €")
-        c2.metric(T["metric_bh_end"], f"{equity_bh.iloc[-1]:,.2f} €")
-        c3.metric(T["metric_outperf"], f"{outperformance_pp:.2f} pp")
-        c4.metric(T["metric_trades"], f"{trade_count}")
-
-        c5, c6, c7, c8 = st.columns(4)
-        c5.metric(T["metric_paid_in"], f"{cumulative_contributions.iloc[-1]:,.2f} €")
-        c6.metric(T["metric_bh_return"], f"{bh_metrics['total_return']:.2f}%")
-        c7.metric(T["metric_exposure"], f"{exposure:.1f}%")
-        c8.metric(T["metric_cash"], f"{avg_cash_quote:.1f}%")
-
-        c9, c10, c11, c12, c13 = st.columns(5)
-        c9.metric(T["metric_bot_return"], f"{bot_metrics['total_return']:.2f}%")
-        c10.metric(T["metric_cagr"], f"{bot_metrics['cagr']:.2f}%")
-        c11.metric(T["metric_dd"], f"{bot_metrics['max_dd']:.2f}%")
-        c12.metric(T["metric_vol"], f"{bot_metrics['volatility']:.2f}%")
-        c13.metric(T["metric_sharpe"], f"{bot_metrics['sharpe']:.2f}")
-
-        st.success(T["end_capital_success"].format(value=f"{equity_bot.iloc[-1]:,.2f} €"))
-
-        # Equity chart
-        equity_fig = go.Figure()
-        equity_fig.add_trace(
-            go.Scatter(
-                x=equity_bot.index,
-                y=equity_bot.values,
-                mode="lines",
-                name=T["equity_label_bot"],
-                line=dict(width=3),
-                hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_bot"] + "</extra>",
-            )
-        )
-        equity_fig.add_trace(
-            go.Scatter(
-                x=equity_bh.index,
-                y=equity_bh.values,
-                mode="lines",
-                name=T["equity_label_bh"],
-                line=dict(width=2, dash="dash"),
-                hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_bh"] + "</extra>",
-            )
-        )
-        equity_fig.add_trace(
-            go.Scatter(
-                x=cumulative_contributions.index,
-                y=cumulative_contributions.values,
-                mode="lines",
-                name=T["equity_label_paid_in"],
-                line=dict(width=2, dash="dot", color="gray"),
-                hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_paid_in"] + "</extra>",
-            )
-        )
-        equity_fig.update_layout(
-            title=T["equity_title"],
-            template="plotly_dark",
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-            margin=dict(l=20, r=20, t=60, b=20),
-            xaxis_title="",
-            yaxis_title="€",
-        )
-        st.plotly_chart(equity_fig, use_container_width=True)
-
-        # Export
-        st.markdown(f"### {T['export_title']}")
-        st.caption(T["export_caption"])
-
-        export_equity_df = pd.DataFrame({
-            T["date_col"]: equity_bot.index,
-            T["bot_portfolio_label"]: equity_bot.values,
-            T["buy_hold_label"]: equity_bh.values,
-            T["equity_label_paid_in"]: cumulative_contributions.values,
-            T["bh_cash_label"]: cash_bot.values,
-            T["invested_label"]: invested_bot.values,
-        })
-
-        equity_csv = make_export_csv(export_equity_df)
-        rebal_csv = make_export_csv(rebalance_df) if not rebalance_df.empty else b""
-        weights_csv = make_export_csv(
-            weights_with_cash.reset_index().rename(columns={"index": T["date_col"]})
-        )
-
-        col_exp1, col_exp2, col_exp3 = st.columns(3)
-
-        col_exp1.download_button(
-            label=T["export_equity"],
-            data=equity_csv,
-            file_name="allocato_equity_curve.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        if tier == "Free":
-            col_exp2.caption(T["export_locked"])
-            col_exp3.caption(T["export_locked"])
-        else:
-            col_exp2.download_button(
-                label=T["export_rebal"],
-                data=rebal_csv,
-                file_name="allocato_rebalancing_log.csv",
-                mime="text/csv",
-                disabled=rebalance_df.empty,
-                use_container_width=True,
-            )
-            col_exp3.download_button(
-                label=T["export_weights"],
-                data=weights_csv,
-                file_name="allocato_weight_history.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-
-        with st.expander(T["interpret_expander"]):
-            st.markdown(
-                T["interpret_text"].format(
-                    outperformance=outperformance_pp,
-                    exposure=exposure,
-                    cash=avg_cash_quote,
-                    trades=trade_count,
-                    conviction=conviction_power,
-                    soft_cash=T["soft_cash_on"] if soft_cash_mode else T["soft_cash_off"],
-                    cash_floor=target_cash_floor_pct,
-                    cash_ceiling=target_cash_ceiling_pct,
-                )
-            )
-            st.markdown(f"### {T['interpret_why_title']}")
-            st.markdown(T["interpret_why_text"])
-
-        st.subheader(T["current_weights"])
-        active_weights_df = weights_df[weights_df[T["weights_current_col"]] > 0].copy()
-        if not active_weights_df.empty:
-            st.dataframe(active_weights_df.round(2), use_container_width=True)
-        else:
-            st.info(T["active_positions_empty"])
-
-        with st.expander(T["show_all_assets"]):
-            st.dataframe(weights_df.round(2), use_container_width=True)
-
-        st.subheader(T["weights_chart_title"])
-        st.caption(T["weights_chart_caption"])
-
-        weights_plot_df = weights_chart_df.copy()
-        weights_fig = go.Figure()
-
-        for col in weights_plot_df.columns:
-            weights_fig.add_trace(
-                go.Scatter(
-                    x=weights_plot_df.index,
-                    y=weights_plot_df[col],
-                    mode="lines",
-                    name=col,
-                    stackgroup="one",
-                    groupnorm="",
-                    hovertemplate="%{x|%Y-%m-%d}<br>" + col + ": %{y:.2f}%<extra></extra>",
-                )
-            )
-
-        weights_fig.update_layout(
-            title=T["weights_chart_inner_title"],
-            template="plotly_dark",
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-            margin=dict(l=20, r=20, t=60, b=20),
-            xaxis_title="",
-            yaxis_title=T["weights_chart_ylabel"],
-        )
-        weights_fig.update_yaxes(range=[0, 100], ticksuffix="%")
-        st.plotly_chart(weights_fig, use_container_width=True)
-
-        with st.expander(T["latest_selection"]):
-            if selected_assets_log:
-                last_selection_date = max(selected_assets_log.keys())
-                st.write(T["last_selection_date"].format(date=last_selection_date.date()))
-                st.write(selected_assets_log[last_selection_date])
-
-                st.write(T["last_target_weights"])
-                last_weights = target_weights_log.get(last_selection_date, {})
-                if last_weights:
-                    last_weights_df = pd.DataFrame({
-                        T["weights_ticker_col"]: list(last_weights.keys()),
-                        T["weights_target_col"]: [v * 100 for v in last_weights.values()],
-                    }).sort_values(T["weights_target_col"], ascending=False)
-                    st.dataframe(last_weights_df.round(2), use_container_width=True)
-                else:
-                    st.write(T["no_positions_selected"])
-            else:
-                st.write(T["no_selection_yet"])
-
-        with st.expander(T["weights_table"]):
-            st.dataframe(weights_with_cash.round(2), use_container_width=True)
-
-        with st.expander(T["weights_rebalance"]):
-            if not weights_rebalance_only.empty:
-                st.dataframe(weights_rebalance_only.round(2), use_container_width=True)
-            else:
-                st.write(T["weights_rebalance_empty"])
-
-        with st.expander(T["rebal_log"]):
-            if not rebalance_df.empty:
-                st.dataframe(rebalance_df.round(2), use_container_width=True)
-            else:
-                st.write(T["rebal_log_empty"])
-
-        if show_debug:
-            with st.expander(T["debug_expander"]):
-                st.write(T["debug_used_tickers"], tickers)
-                st.write(T["debug_skipped"], skipped_tickers)
-                st.write(T["debug_top_n"], top_n)
-                st.write(T["debug_top_n_effective"], effective_top_n)
-                st.write(T["debug_max_weight"], max_weight_pct)
-                st.write(T["debug_conviction"], conviction_power)
-                st.write(T["debug_soft_cash"], soft_cash_mode)
-                st.write(T["debug_regime"], use_regime_filter)
-                st.write(T["debug_last_prices"])
-                st.dataframe(prices.tail(), use_container_width=True)
-                st.write(T["debug_last_scores"])
-                st.dataframe(raw_score.tail(), use_container_width=True)
-
+        context = {
+            "bot_metrics": bot_metrics,
+            "bh_metrics": bh_metrics,
+            "exposure": exposure,
+            "avg_cash_quote": avg_cash_quote,
+            "outperformance_pp": outperformance_pp,
+            "trade_count": trade_count,
+            "conviction_power": conviction_power,
+            "soft_cash_mode": soft_cash_mode,
+            "target_cash_floor_pct": target_cash_floor_pct,
+            "target_cash_ceiling_pct": target_cash_ceiling_pct,
+            "equity_bot": equity_bot,
+            "equity_bh": equity_bh,
+            "cumulative_contributions": cumulative_contributions,
+            "cash_bot": cash_bot,
+            "invested_bot": invested_bot,
+            "rebalance_df": rebalance_df,
+            "weights_with_cash": weights_with_cash,
+            "weights_chart_df": weights_chart_df,
+            "weights_df": weights_df,
+            "selected_assets_log": selected_assets_log,
+            "target_weights_log": target_weights_log,
+            "weights_rebalance_only": weights_rebalance_only,
+            "show_debug": show_debug,
+            "tickers": tickers,
+            "skipped_tickers": skipped_tickers,
+            "top_n": top_n,
+            "effective_top_n": effective_top_n,
+            "max_weight_pct": max_weight_pct,
+            "use_regime_filter": use_regime_filter,
+            "prices": prices,
+            "raw_score": raw_score,
+        }
+        st.session_state["last_calc_results"] = context
+        render_calculation_results(context, T, lang, tier)
         save_logged_in_user_state()
 
-        if tier == "Free":
-            st.caption(T["footer_free"])
-
+elif st.session_state.get("last_calc_results") is not None:
+    render_calculation_results(st.session_state["last_calc_results"], T, lang, tier)
 else:
     st.info(T["info_start"])
     if get_current_tier() == "Free":
