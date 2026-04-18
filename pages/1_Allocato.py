@@ -1550,30 +1550,58 @@ def get_benchmark_list() -> list[str]:
 
 def build_benchmark_equity_series(benchmark_tickers: list[str], period: str, dates: pd.Index, initial_capital: float, monthly_savings: float) -> dict:
     benchmark_map = {}
+    if len(dates) == 0:
+        return benchmark_map
+
+    dates = pd.Index(dates).sort_values()
+    requested_start = dates.min()
+
     for bench in benchmark_tickers:
         series = _download_with_fallbacks(bench, get_period_metadata(period)["yf_period"])
         if series.empty:
             continue
-        series = series.reindex(dates).ffill().dropna()
-        if len(series) < 30:
+
+        series = series.sort_index()
+        floor_start = get_backtest_floor_date(period)
+        if floor_start is not None:
+            series = series.loc[series.index >= floor_start]
+        if series.empty:
             continue
-        bench_dates = series.index
-        first_price = float(series.iloc[0])
-        if first_price <= 0:
+
+        series = series.reindex(dates).ffill(limit=7)
+        first_live_idx = series.first_valid_index()
+        if first_live_idx is None:
             continue
-        shares = initial_capital / first_price
-        equity = pd.Series(index=bench_dates, dtype=float)
-        for i, date in enumerate(bench_dates):
-            price = float(series.loc[date])
+
+        equity = pd.Series(index=dates, dtype=float)
+        shares = 0.0
+        cash = 0.0
+
+        for i, date in enumerate(dates):
             if i > 0:
-                prev_date = bench_dates[i - 1]
+                prev_date = dates[i - 1]
                 if date.month != prev_date.month or date.year != prev_date.year:
-                    shares += monthly_savings / price
-            equity.loc[date] = shares * price
-        benchmark_map[bench] = equity.reindex(dates).ffill()
+                    cash += monthly_savings
+
+            price = series.loc[date]
+            if pd.isna(price):
+                equity.loc[date] = cash
+                continue
+
+            if shares == 0.0 and cash == 0.0 and date >= first_live_idx:
+                cash += initial_capital
+
+            if cash > 0 and price > 0:
+                shares += cash / float(price)
+                cash = 0.0
+
+            equity.loc[date] = shares * float(price) + cash
+
+        equity = equity.ffill().fillna(0.0)
+        if (equity > 0).sum() >= 20:
+            benchmark_map[bench] = equity
+
     return benchmark_map
-
-
 
 
 def init_tax_lot_state(tickers: list[str]) -> dict:
@@ -1627,19 +1655,52 @@ def apply_trade_with_tax(
     return current_shares, 0.0, 0.0
 
 
+BACKTEST_FIXED_START_DEFAULT = pd.Timestamp("2014-01-01")
+BACKTEST_FIXED_START_BY_PERIOD = {
+    "1y": None,
+    "2y": None,
+    "3y": None,
+    "5y": pd.Timestamp("2014-01-01"),
+    "10y": pd.Timestamp("2014-01-01"),
+    "15y": pd.Timestamp("2012-01-01"),
+    "20y": pd.Timestamp("2012-01-01"),
+    "max": pd.Timestamp("2012-01-01"),
+}
+
 def get_period_metadata(period: str) -> dict:
     period = str(period).strip().lower()
     mapping = {
         "1y": {"yf_period": "1y", "preferred_points": 180},
         "2y": {"yf_period": "2y", "preferred_points": 300},
         "3y": {"yf_period": "3y", "preferred_points": 420},
-        "5y": {"yf_period": "5y", "preferred_points": 700},
-        "10y": {"yf_period": "10y", "preferred_points": 1200},
-        "15y": {"yf_period": "15y", "preferred_points": 1800},
-        "20y": {"yf_period": "20y", "preferred_points": 2400},
+        "5y": {"yf_period": "10y", "preferred_points": 700},
+        "10y": {"yf_period": "15y", "preferred_points": 1200},
+        "15y": {"yf_period": "max", "preferred_points": 1800},
+        "20y": {"yf_period": "max", "preferred_points": 2400},
         "max": {"yf_period": "max", "preferred_points": 700},
     }
     return mapping.get(period, mapping["3y"])
+
+def get_backtest_floor_date(period: str) -> pd.Timestamp | None:
+    period = str(period).strip().lower()
+    return BACKTEST_FIXED_START_BY_PERIOD.get(period, BACKTEST_FIXED_START_DEFAULT)
+
+def _safe_series_history_stats(series_map: dict) -> pd.DataFrame:
+    rows = []
+    for ticker, series in series_map.items():
+        s = pd.to_numeric(series, errors="coerce").dropna()
+        if s.empty:
+            continue
+        rows.append({
+            "ticker": ticker,
+            "first_valid": pd.Timestamp(s.index.min()),
+            "last_valid": pd.Timestamp(s.index.max()),
+            "observations": int(len(s)),
+        })
+    if not rows:
+        return pd.DataFrame(columns=["ticker", "first_valid", "last_valid", "observations"])
+    return pd.DataFrame(rows).sort_values(["first_valid", "ticker"]).reset_index(drop=True)
+
 
 def _extract_close_series(raw: pd.DataFrame, ticker: str) -> pd.Series:
     if raw is None or raw.empty:
@@ -1699,6 +1760,7 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
     meta = get_period_metadata(period)
     yf_period = meta["yf_period"]
     preferred_points = meta["preferred_points"]
+    floor_start = get_backtest_floor_date(period)
 
     series_map = {}
     skipped = []
@@ -1724,8 +1786,12 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
             skipped.append(t)
             continue
 
-        # Always keep high-quality large tickers when data exists
-        if len(s) < preferred_points:
+        s = s.sort_index()
+        if floor_start is not None:
+            floor_observations = int((s.index >= floor_start).sum())
+            if floor_observations < preferred_points:
+                partial_history.append(t)
+        elif len(s) < preferred_points:
             partial_history.append(t)
 
         series_map[t] = s
@@ -1745,60 +1811,79 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
     return series_map, skipped, partial_history
 
 
-def align_price_series(series_map, min_overlap_ratio: float = 0.10, ff_limit: int = 15):
+def align_price_series(series_map, period: str, min_live_assets: int = 2, ff_limit: int = 7):
     if not series_map:
-        return pd.DataFrame(), []
+        return pd.DataFrame(), [], {
+            "requested_floor_start": None,
+            "actual_common_start": None,
+            "first_full_coverage_start": None,
+            "asset_history_df": pd.DataFrame(),
+            "live_assets_by_day": pd.Series(dtype=float),
+        }
 
-    prices = pd.concat(series_map.values(), axis=1, join="outer").sort_index()
-    prices = prices[~prices.index.duplicated(keep="last")]
-    prices = prices.replace([np.inf, -np.inf], np.nan)
+    prices_raw = pd.concat(series_map.values(), axis=1, join="outer").sort_index()
+    prices_raw = prices_raw[~prices_raw.index.duplicated(keep="last")]
+    prices_raw = prices_raw.replace([np.inf, -np.inf], np.nan)
 
-    total_rows = len(prices.index)
     keep_cols = []
     dropped_cols = []
-
-    for col in prices.columns:
-        s = prices[col].dropna()
-        if len(s) < 20:
-            dropped_cols.append(col)
-            continue
-        coverage = len(s) / max(total_rows, 1)
-        if coverage < 0.01:
+    for col in prices_raw.columns:
+        s = pd.to_numeric(prices_raw[col], errors="coerce").dropna()
+        if len(s) < 5:
             dropped_cols.append(col)
             continue
         keep_cols.append(col)
 
     if not keep_cols:
-        return pd.DataFrame(), list(prices.columns)
+        return pd.DataFrame(), sorted(set(dropped_cols)), {
+            "requested_floor_start": get_backtest_floor_date(period),
+            "actual_common_start": None,
+            "first_full_coverage_start": None,
+            "asset_history_df": pd.DataFrame(),
+            "live_assets_by_day": pd.Series(dtype=float),
+        }
 
-    trimmed = prices[keep_cols].copy()
-    trimmed = trimmed.ffill(limit=ff_limit).bfill(limit=5)
+    prices = prices_raw[keep_cols].copy()
+    floor_start = get_backtest_floor_date(period)
+    if floor_start is not None:
+        prices = prices.loc[prices.index >= floor_start].copy()
+        if prices.empty:
+            prices = prices_raw[keep_cols].copy()
 
-    valid_row_counts = trimmed.notna().sum(axis=1)
-    min_required = max(2, int(np.ceil(len(trimmed.columns) * min_overlap_ratio)))
-    trimmed = trimmed.loc[valid_row_counts >= min_required].copy()
+    asset_history_df = _safe_series_history_stats(series_map)
+    live_assets_by_day = prices.notna().sum(axis=1)
 
-    if trimmed.empty:
-        return pd.DataFrame(), list(set(list(prices.columns) + dropped_cols))
+    enough_live_mask = live_assets_by_day >= max(1, min_live_assets)
+    if enough_live_mask.any():
+        actual_common_start = prices.index[enough_live_mask.argmax()]
+        prices = prices.loc[prices.index >= actual_common_start].copy()
+        live_assets_by_day = prices.notna().sum(axis=1)
+    else:
+        actual_common_start = prices.index.min()
 
-    final_keep = []
-    protected = {"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "SPY", "QQQ", "BTC-USD", "MSTR", "COIN", "PLTR", "ARM", "ARKK", "DPW.DE"}
-    for col in trimmed.columns:
-        coverage = trimmed[col].notna().mean()
-        if coverage >= 0.08 or col in protected:
-            final_keep.append(col)
-        else:
-            dropped_cols.append(col)
+    prices = prices.ffill(limit=ff_limit)
+    prices = prices.loc[prices.notna().sum(axis=1) >= max(1, min_live_assets)].copy()
 
-    if not final_keep:
-        return pd.DataFrame(), list(set(list(prices.columns) + dropped_cols))
+    if prices.empty:
+        return pd.DataFrame(), sorted(set(dropped_cols)), {
+            "requested_floor_start": floor_start,
+            "actual_common_start": pd.Timestamp(actual_common_start) if actual_common_start is not None else None,
+            "first_full_coverage_start": None,
+            "asset_history_df": asset_history_df,
+            "live_assets_by_day": live_assets_by_day,
+        }
 
-    trimmed = trimmed[final_keep].copy()
-    valid_row_counts = trimmed.notna().sum(axis=1)
-    min_required = max(2, min(len(trimmed.columns), int(np.ceil(len(trimmed.columns) * min_overlap_ratio))))
-    trimmed = trimmed.loc[valid_row_counts >= min_required].copy()
-    trimmed = trimmed.ffill(limit=ff_limit).bfill(limit=5)
-    return trimmed, sorted(set(dropped_cols))
+    full_coverage_mask = prices.notna().all(axis=1)
+    first_full_coverage_start = prices.index[full_coverage_mask.argmax()] if full_coverage_mask.any() else None
+
+    return prices, sorted(set(dropped_cols)), {
+        "requested_floor_start": floor_start,
+        "actual_common_start": pd.Timestamp(actual_common_start) if actual_common_start is not None else None,
+        "first_full_coverage_start": pd.Timestamp(first_full_coverage_start) if first_full_coverage_start is not None else None,
+        "asset_history_df": asset_history_df,
+        "live_assets_by_day": live_assets_by_day,
+    }
+
 
 def load_single_close(ticker, period):
     s = _download_with_fallbacks(ticker, get_period_metadata(period)["yf_period"])
@@ -2302,7 +2387,8 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
         "cash_target": min(max(cash_floor, profile["cash_target"]), cash_ceiling),
     }
 
-def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, top_n: int, simulate_taxes_de: bool):
+def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, top_n: int, simulate_taxes_de: bool, alignment_info: dict | None = None):
+    prices = prices.sort_index().copy()
     tickers = list(prices.columns)
     effective_top_n = min(top_n, len(tickers))
     max_weight = max_weight_pct / 100.0
@@ -2319,13 +2405,6 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     ai_overlay_scores, ai_explanations = compute_ai_overlay_scores(prices, component_scores, lang)
     total_score = compute_total_score_by_regime(prices, regime_df, component_scores, ai_overlay_scores)
 
-    score_stack = pd.concat([
-        component_scores["trend"],
-        component_scores["momentum"],
-        component_scores["quality"],
-        component_scores["risk"],
-        total_score,
-    ], axis=1, keys=["trend", "momentum", "quality", "risk", "total"])
     row_valid_assets = total_score.notna().sum(axis=1)
     valid_mask = row_valid_assets >= 2
     prices = prices.loc[valid_mask].copy()
@@ -2337,6 +2416,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     dates = prices.index
     if len(dates) < 30:
         raise ValueError("too_few_rows")
+
+    valuation_prices = prices.ffill(limit=7)
 
     shares = {t: 0.0 for t in tickers}
     bot_lots_state = init_tax_lot_state(tickers)
@@ -2357,7 +2438,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     estimated_tax_drag_pct_map = {}
 
     for i, date in enumerate(dates):
-        current_prices = prices.loc[date]
+        tradable_prices = prices.loc[date]
+        current_prices = valuation_prices.loc[date]
         prev_date = None if i == 0 else dates[i - 1]
         current_year = int(date.year)
         if bot_tax_state["year"] != current_year:
@@ -2372,13 +2454,17 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
             cash += monthly_savings
             monthly_contribution_added = True
 
-        current_values = {t: shares[t] * float(current_prices[t]) for t in tickers}
-        total_equity_before = cash + sum(current_values.values())
+        current_values = {}
+        for t in tickers:
+            px = float(current_prices[t]) if pd.notna(current_prices[t]) else np.nan
+            current_values[t] = shares[t] * px if pd.notna(px) else 0.0
+
+        total_equity_before = cash + float(np.nansum(list(current_values.values())))
         current_weight_map = {t: (current_values[t] / total_equity_before if total_equity_before > 0 else 0.0) for t in tickers}
 
         strategy_payload = build_target_portfolio_for_date(
             date=date,
-            current_prices=current_prices,
+            current_prices=tradable_prices,
             total_score=total_score,
             regime_df=regime_df,
             component_scores=component_scores,
@@ -2400,7 +2486,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         target_values = {t: 0.0 for t in tickers}
         investable_capital = total_equity_before * min(max(invest_ratio, 0.0), 1.0)
         for tkr in weights.index:
-            target_values[tkr] = investable_capital * float(weights[tkr])
+            if pd.notna(tradable_prices.get(tkr, np.nan)):
+                target_values[tkr] = investable_capital * float(weights[tkr])
 
         target_weight_map = {t: (target_values[t] / total_equity_before if total_equity_before > 0 else 0.0) for t in tickers}
         held_assets = [t for t, s in shares.items() if s > 1e-12]
@@ -2419,7 +2506,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         do_rebalance = scheduled_rebalance or threshold_trigger
 
         if do_rebalance:
-            turnover = sum(abs(target_values[t] - current_values[t]) for t in tickers)
+            turnover = float(np.nansum([abs(target_values[t] - current_values[t]) for t in tickers]))
             fees = turnover * fee_pct
             total_equity_after_fees = max(total_equity_before - fees, 0.0)
 
@@ -2433,9 +2520,13 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
             taxes_due_total = 0.0
 
             for tkr in tickers:
-                price = float(current_prices[tkr])
-                new_shares = target_values[tkr] / price if price > 0 else 0.0
+                price = float(tradable_prices[tkr]) if pd.notna(tradable_prices[tkr]) else np.nan
                 old_shares = shares[tkr]
+
+                if pd.isna(price) or price <= 0:
+                    continue
+
+                new_shares = target_values[tkr] / price if price > 0 else 0.0
                 lot = bot_lots_state.get(tkr, {"shares": 0.0, "cost_total": 0.0})
                 avg_cost = (lot["cost_total"] / lot["shares"]) if lot.get("shares", 0.0) > 1e-12 else price
                 unrealized_gain_pct = ((price / avg_cost) - 1.0) * 100.0 if avg_cost > 0 else 0.0
@@ -2476,19 +2567,22 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
                 shares[tkr] = updated_shares
 
             bot_tax_state["taxes_paid_total"] += taxes_due_total
-            invested_value = sum(shares[t] * float(current_prices[t]) for t in tickers)
+            invested_value = float(np.nansum([
+                shares[t] * (float(current_prices[t]) if pd.notna(current_prices[t]) else 0.0) for t in tickers
+            ]))
             cash = max(0.0, total_equity_after_fees - invested_value - taxes_due_total)
 
             target_weights_log[date] = {tkr: (target_values[tkr] / total_equity_before) for tkr in weights.index} if total_equity_before > 0 else {}
             selected_assets_log[date] = list(selected.index)
 
             bh_monthly_action = "—"
-            if monthly_contribution_added:
-                per_asset_bh = monthly_savings / max(len(tickers), 1)
+            live_bh_assets = int(prices.loc[date].notna().sum())
+            if monthly_contribution_added and live_bh_assets > 0:
+                per_asset_bh = monthly_savings / live_bh_assets
                 bh_monthly_action = (
-                    f"{monthly_savings:,.0f}€ gleichmäßig auf {len(tickers)} Titel ({per_asset_bh:,.2f}€ je Titel)"
+                    f"{monthly_savings:,.0f}€ gleichmäßig auf {live_bh_assets} verfügbare Titel ({per_asset_bh:,.2f}€ je Titel)"
                     if lang == "DE"
-                    else f"{monthly_savings:,.0f}€ spread evenly across {len(tickers)} names ({per_asset_bh:,.2f}€ each)"
+                    else f"{monthly_savings:,.0f}€ spread across {live_bh_assets} available names ({per_asset_bh:,.2f}€ each)"
                 )
 
             reason_parts = [strategy_name]
@@ -2515,7 +2609,9 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
 
             last_regime_code = regime_code
 
-        invested_value = sum(shares[t] * float(current_prices[t]) for t in tickers)
+        invested_value = float(np.nansum([
+            shares[t] * (float(current_prices[t]) if pd.notna(current_prices[t]) else 0.0) for t in tickers
+        ]))
         total_value = max(0.0, invested_value + cash)
         equity_bot.loc[date] = total_value
         cash_bot.loc[date] = cash
@@ -2525,7 +2621,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
 
         if total_value > 0:
             for t in tickers:
-                weight_history.loc[date, t] = (shares[t] * float(current_prices[t])) / total_value * 100
+                px = float(current_prices[t]) if pd.notna(current_prices[t]) else np.nan
+                weight_history.loc[date, t] = ((shares[t] * px) / total_value * 100) if pd.notna(px) else 0.0
             cash_weight_history.loc[date] = cash / total_value * 100
         else:
             weight_history.loc[date] = 0.0
@@ -2533,34 +2630,38 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
 
     bh_shares = {t: 0.0 for t in tickers}
     bh_lots_state = init_tax_lot_state(tickers)
-    bh_cash = 0.0
+    bh_cash = float(initial_capital)
     equity_bh = pd.Series(index=dates, dtype=float)
-    first_prices = prices.iloc[0]
-    bh_weight = 1.0 / len(tickers)
-    for t in tickers:
-        init_shares = (initial_capital * bh_weight) / float(first_prices[t])
-        bh_shares[t] = init_shares
-        bh_lots_state[t]["shares"] = init_shares
-        bh_lots_state[t]["cost_total"] = init_shares * float(first_prices[t])
 
     for i, date in enumerate(dates):
-        current_prices = prices.loc[date]
+        current_prices = valuation_prices.loc[date]
+        live_mask = prices.loc[date].notna()
+        live_tickers = [t for t in tickers if live_mask.get(t, False)]
         current_year = int(date.year)
         if bh_tax_state["year"] != current_year:
             bh_tax_state["year"] = current_year
             bh_tax_state["used_allowance"] = 0.0
+
         if i > 0:
             prev_date = dates[i - 1]
             if date.month != prev_date.month or date.year != prev_date.year:
-                for t in tickers:
-                    price_now = float(current_prices[t])
-                    if price_now <= 0:
-                        continue
-                    add_shares = (monthly_savings * bh_weight) / price_now
-                    bh_shares[t] += add_shares
-                    bh_lots_state[t]["shares"] += add_shares
-                    bh_lots_state[t]["cost_total"] += add_shares * price_now
-        bh_value = sum(max(0.0, bh_shares[t]) * float(current_prices[t]) for t in tickers) + max(0.0, bh_cash)
+                bh_cash += monthly_savings
+
+        if live_tickers and bh_cash > 0:
+            per_asset_bh = bh_cash / len(live_tickers)
+            for t in live_tickers:
+                price_now = float(current_prices[t]) if pd.notna(current_prices[t]) else np.nan
+                if pd.isna(price_now) or price_now <= 0:
+                    continue
+                add_shares = per_asset_bh / price_now
+                bh_shares[t] += add_shares
+                bh_lots_state[t]["shares"] += add_shares
+                bh_lots_state[t]["cost_total"] += add_shares * price_now
+            bh_cash = 0.0
+
+        bh_value = float(np.nansum([
+            max(0.0, bh_shares[t]) * (float(current_prices[t]) if pd.notna(current_prices[t]) else 0.0) for t in tickers
+        ])) + max(0.0, bh_cash)
         equity_bh.loc[date] = max(0.0, bh_value)
 
     bot_metrics = compute_metrics(equity_bot)
@@ -2569,9 +2670,9 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     avg_cash_quote = (cash_bot / equity_bot.replace(0, np.nan)).mean() * 100
     outperformance_pp = bot_metrics["total_return"] - bh_metrics["total_return"]
 
-    last_prices = prices.iloc[-1]
+    last_prices = valuation_prices.iloc[-1]
     final_equity = equity_bot.iloc[-1]
-    current_weights = {t: ((shares[t] * float(last_prices[t]) / final_equity) * 100 if final_equity > 0 else 0.0) for t in tickers}
+    current_weights = {t: ((shares[t] * float(last_prices[t]) / final_equity) * 100 if final_equity > 0 and pd.notna(last_prices[t]) else 0.0) for t in tickers}
     weights_df = pd.DataFrame({
         T["weights_ticker_col"]: list(current_weights.keys()),
         T["weights_current_col"]: list(current_weights.values()),
@@ -2656,6 +2757,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         "latest_top_asset_explanations": latest_top_asset_explanations,
         "enable_ki_explanations": bool(st.session_state.get("enable_ki_explanations", False)),
         "estimated_tax_drag_pct_map": estimated_tax_drag_pct_map,
+        "alignment_info": alignment_info or {},
     }
 
 
@@ -2765,6 +2867,7 @@ def render_calculation_results(context, T, lang, tier):
     simulate_taxes_de = context.get("simulate_taxes_de", False)
     bot_taxes_paid = context.get("bot_taxes_paid", 0.0)
     bh_taxes_paid = context.get("bh_taxes_paid", 0.0)
+    alignment_info = context.get("alignment_info", {})
 
     # Status
     if outperformance_pp > 0:
@@ -2798,6 +2901,42 @@ def render_calculation_results(context, T, lang, tier):
     c11.metric(T["metric_dd"], f"{bot_metrics['max_dd']:.2f}%")
     c12.metric(T["metric_vol"], f"{bot_metrics['volatility']:.2f}%")
     c13.metric(T["metric_sharpe"], f"{bot_metrics['sharpe']:.2f}")
+    
+    requested_floor_start = alignment_info.get("requested_floor_start")
+    actual_common_start = alignment_info.get("actual_common_start")
+    first_full_coverage_start = alignment_info.get("first_full_coverage_start")
+    asset_history_df = alignment_info.get("asset_history_df", pd.DataFrame())
+
+    def _fmt_dt(dt_value):
+        if dt_value is None or pd.isna(dt_value):
+            return "—"
+        try:
+            return pd.Timestamp(dt_value).strftime("%Y-%m-%d")
+        except Exception:
+            return str(dt_value)
+
+    if requested_floor_start is not None or actual_common_start is not None:
+        late_assets = []
+        if isinstance(asset_history_df, pd.DataFrame) and not asset_history_df.empty and actual_common_start is not None:
+            late_assets = asset_history_df.loc[
+                asset_history_df["first_valid"] > pd.Timestamp(actual_common_start), "ticker"
+            ].tolist()
+        st.info(
+            (
+                f"📅 Angeforderter Fix-Start: {_fmt_dt(requested_floor_start)} | Tatsächlicher Simulationsstart: {_fmt_dt(actual_common_start)} | Volle Abdeckung ab: {_fmt_dt(first_full_coverage_start)}"
+                if lang == "DE"
+                else f"📅 Requested fixed start: {_fmt_dt(requested_floor_start)} | Actual simulation start: {_fmt_dt(actual_common_start)} | Full coverage from: {_fmt_dt(first_full_coverage_start)}"
+            )
+        )
+        if late_assets:
+            preview = ", ".join(late_assets[:12]) + (" ..." if len(late_assets) > 12 else "")
+            st.warning(
+                (
+                    f"Diese Assets starten später und werden ab ihrer ersten verfügbaren Historie eingeblendet: {preview}"
+                    if lang == "DE"
+                    else f"These assets start later and are introduced from their first available history onward: {preview}"
+                )
+            )
     
     st.success(T["end_capital_success"].format(value=f"{equity_bot.iloc[-1]:,.2f} €"))
     if simulate_taxes_de:
@@ -3077,6 +3216,10 @@ def render_calculation_results(context, T, lang, tier):
             st.dataframe(prices.tail(), use_container_width=True)
             st.write(T["debug_last_scores"])
             st.dataframe(raw_score.tail(), use_container_width=True)
+            if isinstance(alignment_info.get("asset_history_df"), pd.DataFrame) and not alignment_info.get("asset_history_df").empty:
+                history_df = alignment_info["asset_history_df"].copy()
+                st.write("Asset-Historie / Startdaten" if lang == "DE" else "Asset history / start dates")
+                st.dataframe(history_df, use_container_width=True)
     
 # =========================
 # Apply preset / language
@@ -3886,12 +4029,36 @@ if calculate_clicked:
         for partial_ticker in partial_history_tickers:
             st.info(T["warning_partial_history"].format(ticker=partial_ticker))
 
-        prices, dropped_after_align = align_price_series(series_map)
+        prices, dropped_after_align, alignment_info = align_price_series(series_map, period)
         if dropped_after_align:
             st.info(T["warning_align_reduced"])
         for skipped in dropped_after_align:
             if skipped not in skipped_tickers:
                 st.warning(T["warning_removed_after_align"].format(ticker=skipped))
+
+        requested_floor_start = alignment_info.get("requested_floor_start")
+        actual_common_start = alignment_info.get("actual_common_start")
+        if requested_floor_start is not None or actual_common_start is not None:
+            def _fmt_start(dt_value):
+                if dt_value is None or pd.isna(dt_value):
+                    return "—"
+                return pd.Timestamp(dt_value).strftime("%Y-%m-%d")
+            st.info(
+                (
+                    f"📅 Fixer Analyse-Start: {_fmt_start(requested_floor_start)} | Tatsächlicher Simulationsstart: {_fmt_start(actual_common_start)}"
+                    if lang == "DE"
+                    else f"📅 Fixed analysis start: {_fmt_start(requested_floor_start)} | Actual simulation start: {_fmt_start(actual_common_start)}"
+                )
+            )
+
+        asset_history_df = alignment_info.get("asset_history_df", pd.DataFrame())
+        if isinstance(asset_history_df, pd.DataFrame) and not asset_history_df.empty and requested_floor_start is not None:
+            late_assets = asset_history_df.loc[
+                asset_history_df["first_valid"] > pd.Timestamp(requested_floor_start), "ticker"
+            ].tolist()
+            for late_ticker in late_assets:
+                if late_ticker in prices.columns:
+                    st.info(T["warning_partial_history"].format(ticker=late_ticker))
 
         if prices.empty:
             st.error(T["error_no_data"])
@@ -3923,6 +4090,7 @@ if calculate_clicked:
                 soft_cash_invest_ratio_pct=int(soft_cash_invest_ratio_pct),
                 top_n=int(top_n),
                 simulate_taxes_de=bool(simulate_taxes_de),
+                alignment_info=alignment_info,
             )
         except ValueError:
             st.error(T["error_too_few_rows"])
