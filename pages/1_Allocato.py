@@ -565,7 +565,7 @@ defaults = {
     "top_n": 8,
     "assets_input": "AAPL\nSAP.DE\nSIE.DE\nALV.DE\nMUV2.DE\nJNJ\nPG",
     "asset_search_query": "",
-    "asset_search_select": None,
+    "asset_search_select": [],
     "benchmark_etfs_input": "SPY\nQQQ",
     "simulate_taxes_de": False,
     "enable_ki_explanations": False,
@@ -2541,7 +2541,11 @@ def compute_ai_overlay_scores(prices: pd.DataFrame, component_scores: dict, lang
 
 @st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
 def compute_regime_and_scores_cached(prices: pd.DataFrame, period: str, lang: str, vol_penalty: float):
-    regime_df, component_scores, ai_overlay_scores, ai_explanations, total_score = compute_regime_and_scores_cached(prices, period, lang, vol_penalty)
+    # Interne Hilfsfunktion aufrufen (kein rekursiver Cache-Aufruf mehr)
+    regime_df, _ = compute_market_regime(prices, period, lang)
+    component_scores = compute_component_score_table(prices, regime_df, vol_penalty)
+    ai_overlay_scores, ai_explanations = compute_ai_overlay_scores(prices, component_scores, lang)
+    total_score = compute_total_score_by_regime(prices, regime_df, component_scores, ai_overlay_scores)
     return regime_df, component_scores, ai_overlay_scores, ai_explanations, total_score
 
 
@@ -4318,13 +4322,23 @@ if can_use_asset_search():
     else:
         filtered_assets = filtered_assets.copy()
         filtered_assets["display"] = filtered_assets.apply(lambda row: format_search_option(row, T), axis=1)
+        current_selected_displays = st.session_state.get("asset_search_select", [])
+        if not isinstance(current_selected_displays, (list, tuple, set)):
+            current_selected_displays = []
+        current_selected_displays = [str(x) for x in current_selected_displays]
+        valid_display_options = filtered_assets["display"].tolist()
+        preselected_displays = [x for x in current_selected_displays if x in valid_display_options]
+        if search_query.strip() and not preselected_displays:
+            preselected_displays = valid_display_options[:1]
+
         selected_displays = st.sidebar.multiselect(
             T["asset_search_result"],
-            options=filtered_assets["display"].tolist(),
-            default=filtered_assets["display"].tolist()[:1] if search_query.strip() else [],
-            key="asset_search_select",
+            options=valid_display_options,
+            default=preselected_displays,
+            key="asset_search_select_widget",
             help=T["search_info"],
         )
+        st.session_state["asset_search_select"] = list(selected_displays)
 
         for _, row in filtered_assets.iterrows():
             result_cols = st.sidebar.columns([7, 1])
@@ -4470,22 +4484,22 @@ if calculate_clicked:
             st.error(T["error_min_assets"])
             st.stop()
 
-        load_progress = st.progress(0, text=("Starte Berechnung …" if lang == "DE" else "Starting calculation …"))
+        load_progress = st.progress(0)
         load_status = st.empty()
 
+        # Witzige & unterhaltsame Fortschrittsmeldungen
+        load_progress.progress(0.10, text="Der Bot trinkt gerade seinen Morgenkaffee ☕ und schaut die Charts an...")
         series_map, skipped_tickers, partial_history_tickers = load_close_prices(
-            tickers,
-            period,
-            progress_bar=load_progress,
-            status_box=load_status,
+            tickers, period, progress_bar=load_progress, status_box=load_status
         )
 
+        load_progress.progress(0.35, text="Der Bot pumpt gerade seine KI-Muskeln und berechnet Regime... 🏋️")
         for skipped in skipped_tickers:
             st.warning(T["warning_skip"].format(ticker=skipped))
         for partial_ticker in partial_history_tickers:
             st.info(T["warning_partial_history"].format(ticker=partial_ticker))
 
-        load_progress.progress(0.35, text=("Bereinige Historie & Alignment …" if lang == "DE" else "Cleaning history & alignment …"))
+        load_progress.progress(0.55, text="Jetzt wird die Historie sauber gemacht... Der Bot hasst Datenlücken 😤")
         prices, dropped_after_align, alignment_info = align_price_series(series_map, period)
         if dropped_after_align:
             st.info(T["warning_align_reduced"])
@@ -4526,9 +4540,10 @@ if calculate_clicked:
             st.error(T["error_less_than_2"])
             st.stop()
 
+        load_progress.progress(0.78, text="Regime-Engine läuft heiß... Bull oder Bear? Der Bot entscheidet gerade ⚔️")
+        load_progress.progress(0.93, text="Equity wird stabilisiert... Der Bot macht gerade Yoga mit den Kurven 🧘")
+
         try:
-            load_progress.progress(0.55, text=("Berechne Regime & Scores …" if lang == "DE" else "Computing regime & scores …"))
-            load_progress.progress(0.78, text=("Simuliere Portfolio & Steuern …" if lang == "DE" else "Simulating portfolio & taxes …"))
             context = simulate_allocato_v2(
                 prices=prices,
                 period=period,
@@ -4559,14 +4574,14 @@ if calculate_clicked:
             st.error(T["error_too_few_rows"])
             st.stop()
 
-        load_progress.progress(0.93, text=("Stabilisiere Equity & bereite Anzeige vor …" if lang == "DE" else "Stabilizing equity & preparing visuals …"))
+        load_progress.progress(1.0, text="Fertig! Der Bot hat gerade die Rendite rekultiviert 🌱")
         context["skipped_tickers"] = skipped_tickers + [t for t in dropped_after_align if t not in skipped_tickers]
         context["latest_top_asset_explanations"] = build_latest_top_asset_explanations(context, lang)
         st.session_state["last_calc_results"] = context
-        load_progress.progress(1.0, text=("Fertig" if lang == "DE" else "Done"))
-        render_calculation_results(context, T, lang, tier)
+
         load_progress.empty()
         load_status.empty()
+        render_calculation_results(context, T, lang, tier)
         save_logged_in_user_state()
 
 elif st.session_state.get("last_calc_results") is not None:
