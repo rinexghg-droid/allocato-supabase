@@ -2,7 +2,7 @@ import json
 import hmac
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 import streamlit as st
@@ -91,16 +91,37 @@ def get_subscription_summary_text(tier: str, lang: str) -> str:
     }
     return summaries.get(lang, summaries["DE"]).get(tier, "")
 
+def get_default_subscription_expiry(tier: str) -> str:
+    if tier == "Lifetime":
+        return "Lifetime"
+    if tier == "Free":
+        return ""
+    return (datetime.utcnow() + timedelta(days=30)).date().isoformat()
+
+def ensure_subscription_expiry_for_tier(tier: str):
+    current_value = str(st.session_state.get("subscription_expires_at", "") or "").strip()
+    if tier == "Lifetime":
+        st.session_state["subscription_expires_at"] = "Lifetime"
+        return
+    if tier == "Free":
+        st.session_state["subscription_expires_at"] = ""
+        return
+    if not current_value or current_value.lower() == "lifetime":
+        st.session_state["subscription_expires_at"] = get_default_subscription_expiry(tier)
+
 def format_subscription_expires_at(value: str | None, lang: str) -> str:
     if not value:
         return "—"
+    value_str = str(value).strip()
+    if value_str.lower() == "lifetime":
+        return "Lifetime Access" if lang == "EN" else "Lifetime-Zugang"
     try:
-        dt = datetime.fromisoformat(str(value).replace("Z", ""))
+        dt = datetime.fromisoformat(value_str.replace("Z", ""))
     except Exception:
         try:
-            dt = datetime.strptime(str(value), "%Y-%m-%d")
+            dt = datetime.strptime(value_str, "%Y-%m-%d")
         except Exception:
-            return str(value)
+            return value_str
     if lang == "EN":
         return dt.strftime("%B %d, %Y")
     months = [
@@ -112,7 +133,7 @@ def format_subscription_expires_at(value: str | None, lang: str) -> str:
 def ensure_auth_session_state():
     auth_defaults = {
         "subscription_tier": "Free",
-        "subscription_expires_at": "2026-05-15",
+        "subscription_expires_at": "",
         "auth_logged_in": False,
         "auth_user_email": "",
         "auth_loaded_for": "",
@@ -182,7 +203,7 @@ def get_user_row(email: str):
         supabase = get_supabase_client()
         response = (
             supabase.table("users")
-            .select("email,password_hash,subscription_tier,state_json,created_at,updated_at")
+            .select("email,password_hash,subscription_tier,subscription_expires_at,state_json,created_at,updated_at")
             .eq("email", normalized)
             .limit(1)
             .execute()
@@ -218,6 +239,8 @@ def create_user(email: str, password: str) -> tuple[bool, str]:
         st.session_state["auth_user_email"] = normalized
         st.session_state["auth_is_admin"] = normalized in ADMIN_EMAILS
         st.session_state["subscription_tier"] = "Free"
+    st.session_state["subscription_expires_at"] = ""
+        st.session_state["subscription_expires_at"] = ""
         st.session_state["auth_loaded_for"] = ""
         return True, "Registrierung erfolgreich."
     except Exception as e:
@@ -229,11 +252,17 @@ def update_user_tier(email: str, new_tier: str):
         return
     try:
         now = datetime.utcnow().isoformat()
+        expires_at = get_default_subscription_expiry(new_tier)
         supabase = get_supabase_client()
-        supabase.table("users").update({
+        update_payload = {
             "subscription_tier": new_tier,
             "updated_at": now,
-        }).eq("email", normalized).execute()
+        }
+        try:
+            update_payload["subscription_expires_at"] = expires_at
+        except Exception:
+            pass
+        supabase.table("users").update(update_payload).eq("email", normalized).execute()
     except Exception as e:
         st.error(f"Tier-Update fehlgeschlagen: {e}")
 
@@ -251,6 +280,8 @@ def login_user(email: str, password: str) -> tuple[bool, str]:
     st.session_state["auth_user_email"] = normalized
     st.session_state["auth_is_admin"] = normalized in ADMIN_EMAILS
     st.session_state["subscription_tier"] = resolve_effective_tier(normalized, row.get("subscription_tier"))
+    st.session_state["subscription_expires_at"] = row.get("subscription_expires_at") or get_default_subscription_expiry(st.session_state["subscription_tier"])
+    ensure_subscription_expiry_for_tier(st.session_state["subscription_tier"])
     st.session_state["auth_loaded_for"] = ""
     return True, "Erfolgreich eingeloggt."
 
@@ -361,6 +392,10 @@ def get_auth_texts(lang: str) -> dict:
             "plan_pro_badge": "🚀 Pro active",
             "plan_lifetime_badge": "💎 Lifetime active",
             "manage_subscription_title": "💳 Manage subscription",
+            "subscription_spotlight": "Your plan cockpit",
+            "upgrade_microcopy": "Upgrade buttons stay ready — unlock them with your login.",
+            "lifetime_access": "Lifetime Access",
+            "cancel_subscription_final": "Cancel now and return to Free",
             "active_until": "Active until",
             "plan_includes": "What's included",
             "cancel_subscription_button": "🛑 Cancel subscription",
@@ -409,6 +444,10 @@ def get_auth_texts(lang: str) -> dict:
         "plan_pro_badge": "🚀 Pro aktiv",
         "plan_lifetime_badge": "💎 Lifetime aktiv",
         "manage_subscription_title": "💳 Mein Abo verwalten",
+        "subscription_spotlight": "Dein Plan-Cockpit",
+        "upgrade_microcopy": "Die Upgrade-Buttons sind immer sichtbar — mit Login werden sie direkt scharf.",
+        "lifetime_access": "Lifetime-Zugang",
+        "cancel_subscription_final": "Jetzt kündigen und auf Free zurückfallen",
         "active_until": "Aktiv bis",
         "plan_includes": "Was enthalten ist",
         "cancel_subscription_button": "🛑 Abo kündigen",
@@ -566,6 +605,7 @@ PERSISTENT_STATE_KEYS = [
     "assets_input",
     "asset_search_query",
     "asset_search_select",
+    "subscription_expires_at",
     "_pending_preset",
     "baskets",
     "active_basket",
@@ -596,6 +636,8 @@ def load_logged_in_user_state():
         logout_user()
         return
     st.session_state["subscription_tier"] = resolve_effective_tier(email, row["subscription_tier"])
+    st.session_state["subscription_expires_at"] = row.get("subscription_expires_at") or get_default_subscription_expiry(st.session_state["subscription_tier"])
+    ensure_subscription_expiry_for_tier(st.session_state["subscription_tier"])
     st.session_state["auth_is_admin"] = email in ADMIN_EMAILS
     payload = {}
     if row["state_json"]:
@@ -638,6 +680,7 @@ def enforce_plan_limits():
 
 load_logged_in_user_state()
 enforce_plan_limits()
+ensure_subscription_expiry_for_tier(st.session_state.get("subscription_tier", "Free"))
 maybe_handle_payment_query(st.session_state.get("language", "DE"))
 
 # =========================
@@ -1655,10 +1698,38 @@ st.markdown(
         border: 1px solid rgba(34,197,94,0.30);
         color: #ecfccb;
     }
-    div[data-testid="stButton"] button[kind="secondary"].danger-zone {
-        background: rgba(239,68,68,0.14);
-        border: 1px solid rgba(239,68,68,0.42);
-        color: #fecaca;
+    .sidebar-subscription-panel {
+        background: linear-gradient(135deg, rgba(15,23,42,0.98) 0%, rgba(30,41,59,0.98) 100%);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 18px;
+        padding: 0.95rem 1rem;
+        margin: 0.25rem 0 0.85rem 0;
+        color: rgba(248,250,252,0.95);
+        box-shadow: 0 14px 28px rgba(0,0,0,0.18);
+    }
+    .sidebar-subscription-title {
+        font-size: 1rem;
+        font-weight: 800;
+        color: #f8fafc;
+        margin-bottom: 0.35rem;
+    }
+    .sidebar-subscription-meta {
+        font-size: 0.92rem;
+        color: rgba(248,250,252,0.78);
+        line-height: 1.55;
+        margin-top: 0.35rem;
+    }
+    .sidebar-upgrade-note {
+        font-size: 0.86rem;
+        color: rgba(191,219,254,0.92);
+        line-height: 1.5;
+        margin: 0.15rem 0 0.55rem 0;
+    }
+    div[data-testid="stButton"] button[kind="secondary"] {
+        border-radius: 12px;
+    }
+    div[data-testid="stButton"] button[kind="secondary"][data-baseweb="button"] {
+        min-height: 2.6rem;
     }
     </style>
     """,
@@ -1707,6 +1778,13 @@ lang = st.session_state.get("language", "DE")
 T = TRANSLATIONS[lang]
 
 AUTH_T = get_auth_texts(lang)
+
+if st.sidebar.button(
+    "🏠 Zur Landing Page" if lang == "DE" else "🏠 Back to Landing Page",
+    key="back_to_landing_page",
+    use_container_width=True,
+):
+    st.switch_page("app.py")
 
 st.sidebar.header(AUTH_T["account_header"])
 
@@ -1788,6 +1866,7 @@ else:
 
 st.sidebar.subheader(AUTH_T["upgrade_title"])
 st.sidebar.caption(AUTH_T["upgrade_hint"])
+st.sidebar.markdown(f"<div class='sidebar-upgrade-note'>{AUTH_T["upgrade_microcopy"]}</div>", unsafe_allow_html=True)
 
 upgrade_col_1, upgrade_col_2, upgrade_col_3 = st.sidebar.columns(3)
 
@@ -1856,30 +1935,63 @@ if st.session_state.get("auth_logged_in"):
             else:
                 st.sidebar.error(message)
 
-    with st.sidebar.expander(AUTH_T["manage_subscription_title"], expanded=False):
+    with st.sidebar.expander(AUTH_T["manage_subscription_title"], expanded=True):
+        expiry_text = format_subscription_expires_at(st.session_state.get("subscription_expires_at"), lang)
         st.markdown(
-            f"<div class='sidebar-plan-badge'>{TIER_ICONS.get(tier, '🔑')} {plan_badge_map.get(tier, tier)}</div>",
+            f"""
+            <div class="sidebar-subscription-panel">
+                <div class="sidebar-account-kicker">{AUTH_T["subscription_spotlight"]}</div>
+                <div class="sidebar-subscription-title">{TIER_ICONS.get(tier, "🔑")} {plan_badge_map.get(tier, tier)}</div>
+                <div class="sidebar-subscription-meta"><strong>{AUTH_T["active_until"]}:</strong> {expiry_text}</div>
+                <div class="sidebar-subscription-meta"><strong>{AUTH_T["plan_includes"]}:</strong> {get_subscription_summary_text(tier, lang)}</div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
-        st.caption(f"{AUTH_T['active_until']}: {format_subscription_expires_at(st.session_state.get('subscription_expires_at'), lang)}")
-        st.info(get_subscription_summary_text(tier, lang))
-        st.error(AUTH_T["cancel_subscription_warning"])
-        st.checkbox(
-            AUTH_T["cancel_subscription_confirm"],
-            key="cancel_subscription_confirmed",
+
+        st.caption(
+            "💡 Lifetime wird dauerhaft freigeschaltet und bleibt ohne Ablauf einfach entspannt aktiv."
+            if lang == "DE"
+            else "💡 Lifetime stays unlocked for good and remains active without an expiry date."
         )
-        if st.button(AUTH_T["cancel_subscription_button"], key="cancel_subscription_button", use_container_width=True, type="secondary"):
-            if not st.session_state.get("cancel_subscription_confirmed", False):
-                st.sidebar.error(AUTH_T["cancel_subscription_need_confirm"])
-            else:
-                update_user_tier(st.session_state["auth_user_email"], "Free")
-                st.session_state["subscription_tier"] = "Free"
-                st.session_state["subscription_expires_at"] = ""
-                st.session_state["cancel_subscription_confirmed"] = False
-                enforce_plan_limits()
-                save_logged_in_user_state()
-                st.sidebar.success(AUTH_T["cancel_subscription_success"])
-                st.rerun()
+
+        sub_col_1, sub_col_2, sub_col_3 = st.columns(3)
+        with sub_col_1:
+            st.link_button("Basic", build_checkout_url(STRIPE_BASIC), use_container_width=True)
+        with sub_col_2:
+            st.link_button("Pro", build_checkout_url(STRIPE_PRO), use_container_width=True)
+        with sub_col_3:
+            st.link_button("Lifetime", build_checkout_url(STRIPE_LIFETIME), use_container_width=True)
+
+        if tier != "Free":
+            st.warning(AUTH_T["cancel_subscription_warning"])
+            st.checkbox(
+                AUTH_T["cancel_subscription_confirm"],
+                key="cancel_subscription_confirmed",
+            )
+            if st.button(
+                AUTH_T["cancel_subscription_final"],
+                key="cancel_subscription_button",
+                use_container_width=True,
+                type="secondary",
+            ):
+                if not st.session_state.get("cancel_subscription_confirmed", False):
+                    st.sidebar.error(AUTH_T["cancel_subscription_need_confirm"])
+                else:
+                    update_user_tier(st.session_state["auth_user_email"], "Free")
+                    st.session_state["subscription_tier"] = "Free"
+                    st.session_state["subscription_expires_at"] = ""
+                    st.session_state["cancel_subscription_confirmed"] = False
+                    enforce_plan_limits()
+                    save_logged_in_user_state()
+                    st.sidebar.success(AUTH_T["cancel_subscription_success"])
+                    st.rerun()
+        else:
+            st.info(
+                "🆓 Du bist aktuell im Free-Modus unterwegs — sobald du upgraden willst, sind die Buttons direkt startklar."
+                if lang == "DE"
+                else "🆓 You are currently cruising on Free — whenever you want to upgrade, the buttons are ready."
+            )
 
     if st.sidebar.button(AUTH_T["logout_button"], use_container_width=True):
         logout_user()
