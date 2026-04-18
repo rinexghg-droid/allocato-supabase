@@ -540,6 +540,7 @@ defaults = {
     "asset_search_query": "",
     "asset_search_select": None,
     "benchmark_etfs_input": "SPY\nQQQ",
+    "simulate_taxes_de": False,
 }
 
 for k, v in defaults.items():
@@ -609,6 +610,7 @@ PERSISTENT_STATE_KEYS = [
     "asset_search_query",
     "asset_search_select",
     "benchmark_etfs_input",
+    "simulate_taxes_de",
     "subscription_expires_at",
     "_pending_preset",
     "baskets",
@@ -1012,6 +1014,11 @@ TRANSLATIONS = {
         "benchmark_input": "Benchmark-ETF Ticker (einer pro Zeile)",
         "benchmark_input_help": "Beispiele: SPY, QQQ, VWCE.DE, URTH, IWDA.AS",
         "benchmark_added_title": "Zusätzliche ETF-Benchmarks",
+        "simulate_taxes_de": "Steuern DE simulieren (26,375 %)",
+        "simulate_taxes_de_help": "Simuliert Abgeltungsteuer auf realisierte Gewinne mit 1.000 € Freistellungsbetrag pro Jahr und Average-Cost-Methode.",
+        "taxes_col": "Steuern €",
+        "tax_note_title": "Steuern & Realismus",
+        "tax_note_text": "- Aktivierte Steuern belasten realisierte Gewinne des Bots sofort über Cash.\n- Verwendet wird die Average-Cost-Methode für Einstandspreise.\n- Pro Kalenderjahr werden automatisch 1.000 € Freistellungsbetrag berücksichtigt.\n- Buy & Hold realisiert in dieser Simulation kaum Gewinne, weil Positionen fast nie verkauft werden. Dadurch wird der Vergleich realistischer und der Bot weniger künstlich bevorzugt.",
         "buy_hold_action_col": "Buy & Hold Aktion",
         "annual_returns_title": "📅 Jährliche Renditen",
         "annual_returns_year": "Jahr",
@@ -1305,6 +1312,11 @@ TRANSLATIONS = {
         "benchmark_input": "Benchmark ETF tickers (one per line)",
         "benchmark_input_help": "Examples: SPY, QQQ, VWCE.DE, URTH, IWDA.AS",
         "benchmark_added_title": "Additional ETF benchmarks",
+        "simulate_taxes_de": "Simulate German taxes (26.375%)",
+        "simulate_taxes_de_help": "Simulates capital gains tax on realized profits with a €1,000 annual allowance and average-cost accounting.",
+        "taxes_col": "Taxes €",
+        "tax_note_title": "Taxes & realism",
+        "tax_note_text": "- Enabled taxes reduce bot cash immediately when gains are realized.\n- The simulation uses an average-cost basis.\n- A €1,000 yearly allowance is applied automatically.\n- Buy & Hold realizes very few gains in this setup because positions are rarely sold. That makes the comparison more realistic and prevents an artificial bot advantage.",
         "buy_hold_action_col": "Buy & Hold Action",
         "annual_returns_title": "📅 Annual returns",
         "annual_returns_year": "Year",
@@ -1540,6 +1552,58 @@ def build_benchmark_equity_series(benchmark_tickers: list[str], period: str, dat
         benchmark_map[bench] = equity.reindex(dates).ffill()
     return benchmark_map
 
+
+
+
+def init_tax_lot_state(tickers: list[str]) -> dict:
+    return {
+        t: {"shares": 0.0, "cost_total": 0.0}
+        for t in tickers
+    }
+
+def apply_trade_with_tax(
+    ticker: str,
+    current_shares: float,
+    target_shares: float,
+    price: float,
+    lots_state: dict,
+    taxes_enabled: bool,
+    tax_state: dict,
+    tax_rate: float,
+) -> tuple[float, float, float]:
+    if price <= 0:
+        return current_shares, 0.0, 0.0
+
+    lot = lots_state.setdefault(ticker, {"shares": 0.0, "cost_total": 0.0})
+    current_value = current_shares * price
+    target_value = target_shares * price
+    tax_due = 0.0
+
+    if target_shares > current_shares + 1e-12:
+        buy_shares = target_shares - current_shares
+        buy_cost = buy_shares * price
+        lot["shares"] += buy_shares
+        lot["cost_total"] += buy_cost
+        return target_shares, target_value - current_value, 0.0
+
+    if target_shares < current_shares - 1e-12:
+        sell_shares = current_shares - target_shares
+        avg_cost = (lot["cost_total"] / lot["shares"]) if lot["shares"] > 1e-12 else price
+        realized_gain = max(0.0, (price - avg_cost) * sell_shares)
+        if taxes_enabled and realized_gain > 0:
+            remaining_allowance = max(0.0, 1000.0 - tax_state["used_allowance"])
+            allowance_applied = min(remaining_allowance, realized_gain)
+            taxable_gain = max(0.0, realized_gain - allowance_applied)
+            tax_state["used_allowance"] += allowance_applied
+            tax_due = taxable_gain * tax_rate
+        lot["shares"] = max(0.0, lot["shares"] - sell_shares)
+        lot["cost_total"] = max(0.0, lot["cost_total"] - avg_cost * sell_shares)
+        if lot["shares"] <= 1e-12:
+            lot["shares"] = 0.0
+            lot["cost_total"] = 0.0
+        return target_shares, target_value - current_value, tax_due
+
+    return current_shares, 0.0, 0.0
 
 
 def get_period_metadata(period: str) -> dict:
@@ -1879,6 +1943,9 @@ def render_calculation_results(context, T, lang, tier):
     raw_score = context["raw_score"]
     annual_returns_df = compute_annual_returns(equity_bot, equity_bh, T)
     benchmark_equities = context.get("benchmark_equities", {})
+    simulate_taxes_de = context.get("simulate_taxes_de", False)
+    bot_taxes_paid = context.get("bot_taxes_paid", 0.0)
+    bh_taxes_paid = context.get("bh_taxes_paid", 0.0)
 
     # Status
     if outperformance_pp > 0:
@@ -1914,6 +1981,8 @@ def render_calculation_results(context, T, lang, tier):
     c13.metric(T["metric_sharpe"], f"{bot_metrics['sharpe']:.2f}")
     
     st.success(T["end_capital_success"].format(value=f"{equity_bot.iloc[-1]:,.2f} €"))
+    if simulate_taxes_de:
+        st.caption(f"🇩🇪 {T['taxes_col']}: Bot {bot_taxes_paid:,.2f} € | Buy & Hold {bh_taxes_paid:,.2f} €")
     st.markdown(
         f"""
         <div style="margin:.35rem 0 1rem 0;padding:.9rem 1rem;border-radius:16px;
@@ -2049,6 +2118,9 @@ def render_calculation_results(context, T, lang, tier):
         )
         st.markdown(f"### {T['interpret_why_title']}")
         st.markdown(T["interpret_why_text"])
+        if simulate_taxes_de:
+            st.markdown(f"### {T['tax_note_title']}")
+            st.markdown(T["tax_note_text"])
     
     with st.expander(T["annual_returns_title"], expanded=True):
         if not annual_returns_df.empty:
@@ -2144,6 +2216,7 @@ def render_calculation_results(context, T, lang, tier):
                 T["rebal_reason_col"],
                 T["turnover_col"],
                 T["fees_col"],
+                T["taxes_col"],
                 T["cash_eur_col"],
                 T["portfolio_eur_col"],
             ]
@@ -2924,6 +2997,12 @@ st.sidebar.text_area(
     help=T["benchmark_input_help"],
 )
 
+simulate_taxes_de = st.sidebar.checkbox(
+    T["simulate_taxes_de"],
+    key="simulate_taxes_de",
+    help=T["simulate_taxes_de_help"],
+)
+
 # =========================
 # Explainers
 # =========================
@@ -2986,6 +3065,10 @@ if calculate_clicked:
         cash_floor = target_cash_floor_pct / 100.0
         cash_ceiling = target_cash_ceiling_pct / 100.0
         soft_invest_ratio = soft_cash_invest_ratio_pct / 100.0
+        tax_rate = 0.26375
+        simulate_taxes_de = bool(st.session_state.get("simulate_taxes_de", False))
+        bot_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
+        bh_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
 
         sma200 = prices.rolling(200).mean()
         mom_63 = prices / prices.shift(63) - 1
@@ -3015,6 +3098,7 @@ if calculate_clicked:
 
         dates = prices.index
         shares = {t: 0.0 for t in tickers}
+        bot_lots_state = init_tax_lot_state(tickers)
         cash = float(initial_capital)
 
         equity_bot = pd.Series(index=dates, dtype=float)
@@ -3032,6 +3116,11 @@ if calculate_clicked:
         for i, date in enumerate(dates):
             current_prices = prices.loc[date]
             prev_date = None if i == 0 else dates[i - 1]
+
+            current_year = int(date.year)
+            if bot_tax_state["year"] != current_year:
+                bot_tax_state["year"] = current_year
+                bot_tax_state["used_allowance"] = 0.0
 
             if daily_cash_rate > 0:
                 cash *= (1 + daily_cash_rate)
@@ -3137,22 +3226,35 @@ if calculate_clicked:
 
                 buy_actions = []
                 sell_actions = []
+                taxes_due_total = 0.0
 
                 for tkr in tickers:
-                    price = current_prices[tkr]
+                    price = float(current_prices[tkr])
                     new_shares = target_values[tkr] / price if price > 0 else 0.0
-                    delta_shares = new_shares - shares[tkr]
-                    delta_value = target_values[tkr] - current_values[tkr]
+                    old_shares = shares[tkr]
+                    updated_shares, delta_value, tax_due = apply_trade_with_tax(
+                        ticker=tkr,
+                        current_shares=old_shares,
+                        target_shares=new_shares,
+                        price=price,
+                        lots_state=bot_lots_state,
+                        taxes_enabled=simulate_taxes_de,
+                        tax_state=bot_tax_state,
+                        tax_rate=tax_rate,
+                    )
+                    delta_shares = updated_shares - old_shares
                     if abs(delta_shares) > 1e-12:
                         trade_count += 1
                         if delta_value > 1e-6:
                             buy_actions.append(f"{tkr} (+{delta_value:,.0f}€)")
                         elif delta_value < -1e-6:
                             sell_actions.append(f"{tkr} ({delta_value:,.0f}€)")
-                    shares[tkr] = new_shares
+                    taxes_due_total += tax_due
+                    shares[tkr] = updated_shares
 
+                bot_tax_state["taxes_paid_total"] += taxes_due_total
                 invested_value = sum(shares[tkr] * current_prices[tkr] for tkr in tickers)
-                cash = total_equity_after_fees - invested_value
+                cash = total_equity_after_fees - invested_value - taxes_due_total
 
                 if not regime_today_ok:
                     rebalance_reason = "Regime-Filter / Defensive Phase" if lang == "DE" else "Regime filter / defensive phase"
@@ -3182,6 +3284,7 @@ if calculate_clicked:
                     T["rebal_reason_col"]: rebalance_reason,
                     T["turnover_col"]: float(turnover),
                     T["fees_col"]: float(fees),
+                    T["taxes_col"]: float(taxes_due_total),
                     T["cash_eur_col"]: float(cash),
                     T["portfolio_eur_col"]: float(total_equity_after_fees),
                 })
@@ -3206,22 +3309,52 @@ if calculate_clicked:
 
         # Benchmark
         bh_shares = {tkr: 0.0 for tkr in tickers}
+        bh_lots_state = init_tax_lot_state(tickers)
+        bh_cash = 0.0
         equity_bh = pd.Series(index=dates, dtype=float)
         first_prices = prices.iloc[0]
         bh_weight = 1.0 / len(tickers)
 
         for tkr in tickers:
-            bh_shares[tkr] = (initial_capital * bh_weight) / first_prices[tkr]
+            init_shares = (initial_capital * bh_weight) / first_prices[tkr]
+            bh_shares[tkr] = init_shares
+            bh_lots_state[tkr]["shares"] = init_shares
+            bh_lots_state[tkr]["cost_total"] = init_shares * float(first_prices[tkr])
 
         for i, date in enumerate(dates):
             current_prices = prices.loc[date]
+            current_year = int(date.year)
+            if bh_tax_state["year"] != current_year:
+                bh_tax_state["year"] = current_year
+                bh_tax_state["used_allowance"] = 0.0
             if i > 0:
                 prev_date = dates[i - 1]
                 if date.month != prev_date.month:
                     for tkr in tickers:
-                        bh_shares[tkr] += (monthly_savings * bh_weight) / current_prices[tkr]
+                        add_shares = (monthly_savings * bh_weight) / current_prices[tkr]
+                        bh_shares[tkr] += add_shares
+                        bh_lots_state[tkr]["shares"] += add_shares
+                        bh_lots_state[tkr]["cost_total"] += add_shares * float(current_prices[tkr])
 
-            bh_value = sum(bh_shares[tkr] * current_prices[tkr] for tkr in tickers)
+            if i == len(dates) - 1 and simulate_taxes_de:
+                bh_tax_due_total = 0.0
+                for tkr in tickers:
+                    updated_shares, _, tax_due = apply_trade_with_tax(
+                        ticker=tkr,
+                        current_shares=bh_shares[tkr],
+                        target_shares=0.0,
+                        price=float(current_prices[tkr]),
+                        lots_state=bh_lots_state,
+                        taxes_enabled=True,
+                        tax_state=bh_tax_state,
+                        tax_rate=tax_rate,
+                    )
+                    bh_tax_due_total += tax_due
+                    bh_shares[tkr] = updated_shares
+                bh_tax_state["taxes_paid_total"] += bh_tax_due_total
+                bh_cash -= bh_tax_due_total
+
+            bh_value = sum(bh_shares[tkr] * current_prices[tkr] for tkr in tickers) + bh_cash
             equity_bh.loc[date] = bh_value
 
         bot_metrics = compute_metrics(equity_bot)
@@ -3299,6 +3432,9 @@ if calculate_clicked:
             "prices": prices,
             "raw_score": raw_score,
             "benchmark_equities": benchmark_equities,
+            "simulate_taxes_de": simulate_taxes_de,
+            "bot_taxes_paid": bot_tax_state["taxes_paid_total"],
+            "bh_taxes_paid": bh_tax_state["taxes_paid_total"],
         }
         st.session_state["last_calc_results"] = context
         render_calculation_results(context, T, lang, tier)
