@@ -2706,6 +2706,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         cash_floor = min(cash_floor, cash_ceiling)
     soft_invest_ratio = float(np.clip(soft_cash_invest_ratio_pct / 100.0, 0.70, 1.0))
     tax_rate = 0.26375
+    T_local = TRANSLATIONS[lang]
     bot_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
     bh_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
 
@@ -3055,7 +3056,6 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     weights_with_cash = weight_history.copy()
     weights_with_cash["Cash"] = cash_weight_history
     weights_with_cash = weights_with_cash.fillna(0.0).clip(lower=0.0, upper=100.0)
-    T_local = TRANSLATIONS[lang]
     weights_chart_df = simplify_weight_chart(weights_with_cash, top_k=weight_chart_top_n_value, other_label=T_local["other_label"])
     rebalance_dates = [entry[T_local["date_col"]] for entry in rebalance_log]
     weights_rebalance_only = weights_with_cash.loc[weights_with_cash.index.intersection(rebalance_dates)].copy()
