@@ -239,7 +239,6 @@ def create_user(email: str, password: str) -> tuple[bool, str]:
         st.session_state["auth_user_email"] = normalized
         st.session_state["auth_is_admin"] = normalized in ADMIN_EMAILS
         st.session_state["subscription_tier"] = "Free"
-    st.session_state["subscription_expires_at"] = ""
         st.session_state["subscription_expires_at"] = ""
         st.session_state["auth_loaded_for"] = ""
         return True, "Registrierung erfolgreich."
@@ -292,6 +291,7 @@ def logout_user():
     st.session_state["auth_loaded_for"] = ""
     st.session_state["auth_is_admin"] = False
     st.session_state["subscription_tier"] = "Free"
+    st.session_state["subscription_expires_at"] = ""
 
 def update_user_password(email: str, current_password: str, new_password: str) -> tuple[bool, str]:
     normalized = normalize_email(email)
@@ -1779,12 +1779,6 @@ T = TRANSLATIONS[lang]
 
 AUTH_T = get_auth_texts(lang)
 
-if st.sidebar.button(
-    "🏠 Zur Landing Page" if lang == "DE" else "🏠 Back to Landing Page",
-    key="back_to_landing_page",
-    use_container_width=True,
-):
-    st.switch_page("app.py")
 
 st.sidebar.header(AUTH_T["account_header"])
 
@@ -1866,7 +1860,7 @@ else:
 
 st.sidebar.subheader(AUTH_T["upgrade_title"])
 st.sidebar.caption(AUTH_T["upgrade_hint"])
-st.sidebar.markdown(f"<div class='sidebar-upgrade-note'>{AUTH_T["upgrade_microcopy"]}</div>", unsafe_allow_html=True)
+st.sidebar.markdown(f"<div class='sidebar-upgrade-note'>{AUTH_T['upgrade_microcopy']}</div>", unsafe_allow_html=True)
 
 upgrade_col_1, upgrade_col_2, upgrade_col_3 = st.sidebar.columns(3)
 
