@@ -525,7 +525,7 @@ defaults = {
     "rebalance_freq": "Monatlich",
     "fee_pct_input": 0.10,
     "min_score": 0.00,
-    "max_weight_pct": 35,
+    "max_weight_pct": 30,
     "vol_penalty": 0.08,
     "cash_interest_pct": 0.00,
     "use_regime_filter": False,
@@ -700,7 +700,7 @@ PRESETS = {
         "assets_input": "AAPL\nSAP.DE\nSIE.DE\nALV.DE\nMUV2.DE\nJNJ\nPG",
         "top_n": 4,
         "conviction_power": 1.8,
-        "max_weight_pct": 35,
+        "max_weight_pct": 30,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
         "min_score": 0.00,
@@ -717,7 +717,7 @@ PRESETS = {
         ),
         "top_n": 5,
         "conviction_power": 2.0,
-        "max_weight_pct": 35,
+        "max_weight_pct": 30,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
         "min_score": 0.00,
@@ -733,7 +733,7 @@ PRESETS = {
         ),
         "top_n": 5,
         "conviction_power": 2.0,
-        "max_weight_pct": 35,
+        "max_weight_pct": 30,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
         "min_score": 0.00,
@@ -749,7 +749,7 @@ PRESETS = {
         ),
         "top_n": 6,
         "conviction_power": 1.8,
-        "max_weight_pct": 35,
+        "max_weight_pct": 30,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
         "min_score": 0.00,
@@ -2138,7 +2138,7 @@ def conviction_weights(score_series: pd.Series, max_weight: float, power: float)
     s = s[s > 0].copy()
     if s.empty:
         return s
-    hard_cap = min(max_weight, 0.40)
+    hard_cap = min(max_weight, 0.30)
     s = (s.clip(lower=0.0) + 1e-9) ** max(1.0, min(power, 2.8))
     s = s / s.sum()
     final = pd.Series(0.0, index=s.index, dtype=float)
@@ -2593,7 +2593,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     prices = sanitize_price_panel(prices.sort_index().copy())
     tickers = list(prices.columns)
     effective_top_n = min(top_n, len(tickers))
-    max_weight_pct = int(np.clip(max_weight_pct, 1, 40))
+    max_weight_pct = int(np.clip(max_weight_pct, 1, 30))
     max_weight = max_weight_pct / 100.0
     daily_cash_rate = (cash_interest_pct / 100.0) / 252.0
     cash_floor = max(target_cash_floor_pct / 100.0, 0.02)
@@ -4022,10 +4022,35 @@ min_score = st.sidebar.number_input(
     help=T["min_score_help"],
 )
 
+if "max_weight_pct" in st.session_state:
+    try:
+        st.session_state["max_weight_pct"] = int(np.clip(int(st.session_state.get("max_weight_pct", 30)), 1, 30))
+    except Exception:
+        st.session_state["max_weight_pct"] = 30
+
+if "vol_penalty" in st.session_state:
+    try:
+        st.session_state["vol_penalty"] = float(np.clip(float(st.session_state.get("vol_penalty", 0.08)), 0.0, 2.0))
+    except Exception:
+        st.session_state["vol_penalty"] = 0.08
+
+if "conviction_power" in st.session_state:
+    try:
+        st.session_state["conviction_power"] = float(np.clip(float(st.session_state.get("conviction_power", 1.8)), 1.0, 3.0))
+    except Exception:
+        st.session_state["conviction_power"] = 1.8
+
+if "target_cash_ceiling_pct" in st.session_state:
+    try:
+        st.session_state["target_cash_ceiling_pct"] = int(np.clip(int(st.session_state.get("target_cash_ceiling_pct", 8)), 5, 12))
+    except Exception:
+        st.session_state["target_cash_ceiling_pct"] = 8
+
+
 max_weight_pct = st.sidebar.number_input(
     T["max_weight"],
     min_value=1,
-    max_value=40,
+    max_value=30,
     step=5,
     key="max_weight_pct",
     help=T["max_weight_help"],
@@ -4034,7 +4059,8 @@ max_weight_pct = st.sidebar.number_input(
 vol_penalty = st.sidebar.number_input(
     T["vol_penalty"],
     min_value=0.0,
-    step=0.01,
+    max_value=2.0,
+    step=0.05,
     format="%.2f",
     key="vol_penalty",
     help=T["vol_penalty_help"],
@@ -4066,7 +4092,7 @@ st.sidebar.subheader(T["aggressive_mode"])
 conviction_power = st.sidebar.slider(
     T["conviction"],
     min_value=1.0,
-    max_value=4.0,
+    max_value=3.0,
     step=0.1,
     key="conviction_power",
     help=T["conviction_help"],
@@ -4097,7 +4123,7 @@ if "soft_cash_invest_ratio_pct" in st.session_state:
 target_cash_ceiling_pct = st.sidebar.slider(
     T["cash_ceiling"],
     min_value=5,
-    max_value=30,
+    max_value=12,
     step=1,
     key="target_cash_ceiling_pct",
     help=T["cash_ceiling_help"],
