@@ -2186,7 +2186,24 @@ def compute_total_score_by_regime(prices: pd.DataFrame, regime_df: pd.DataFrame,
     return total.clip(lower=0, upper=100)
 
 def should_threshold_rebalance(date, regime_code: str, held_assets: list[str], selected_assets: list[str], current_weight_map: dict, target_weight_map: dict, score_today: pd.Series, component_scores: dict, last_regime_code: str | None) -> tuple[bool, str]:
-
+    if last_regime_code is not None and regime_code != last_regime_code:
+        return True, "Regimewechsel"
+    for ticker in selected_assets:
+        drift = abs(target_weight_map.get(ticker, 0.0) - current_weight_map.get(ticker, 0.0))
+        if drift > 0.08:
+            return True, "Gewichtsdrift > 8%"
+    if held_assets:
+        held_score = score_today.reindex(held_assets).dropna().mean() if any(t in score_today.index for t in held_assets) else 0.0
+        selected_score = score_today.reindex(selected_assets).dropna().mean() if any(t in score_today.index for t in selected_assets) else 0.0
+        if selected_score - held_score > 10:
+            return True, "neues Top-Asset deutlich besser"
+    for ticker in held_assets:
+        try:
+            if component_scores["trend"].loc[date, ticker] < 35:
+                return True, f"Trendbruch {ticker}"
+        except Exception:
+            pass
+    return False, "Kein Schwellen-Trigger"
 def should_skip_sale_for_tax(ticker: str, current_shares: float, target_shares: float, price: float, lots_state: dict, taxes_enabled: bool, regime_code: str, trend_score: float, score_gap: float) -> bool:
     if not taxes_enabled or target_shares >= current_shares or current_shares <= 0 or price <= 0:
         return False
