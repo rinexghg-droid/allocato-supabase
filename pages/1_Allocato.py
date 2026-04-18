@@ -503,7 +503,7 @@ def get_max_baskets() -> int:
     return 1 if get_current_tier() == "Free" else 999
 
 def get_max_period() -> str:
-    return "3y" if get_current_tier() == "Free" else "5y"
+    return "3y" if get_current_tier() == "Free" else "max"
 
 def can_use_asset_search() -> bool:
     return get_current_tier() in ["Basic", "Pro", "Lifetime"]
@@ -893,7 +893,7 @@ TRANSLATIONS = {
         "period": "Zeitraum",
         "period_help": "Für Momentum-Strategien sind 3 bis 5 Jahre meist am sinnvollsten.",
         "rebalance": "Rebalancing",
-        "rebalance_options": ["Monatlich", "Quartalsweise"],
+        "rebalance_options": ["Aus", "Jährlich", "Quartalsweise", "Monatlich", "Alle 2 Jahre", "Alle 5 Jahre"],
         "fee": "Transaktionskosten pro Trade (%)",
         "fee_help": "Gebühren und Slippage pro Umschichtung.",
         "min_score": "Mindest-Score für Kauf",
@@ -999,6 +999,18 @@ TRANSLATIONS = {
         "spinner": "Berechne aggressives dynamisches Portfolio...",
         "error_min_assets": "Bitte mindestens 2 Ticker eingeben.",
         "warning_skip": "Keine Daten für {ticker} – wird übersprungen.",
+        "warning_partial_history": "{ticker} hat nur begrenzte Historie, wird aber trotzdem verwendet.",
+        "warning_removed_after_align": "{ticker} wurde wegen zu vieler Datenlücken nach der Bereinigung entfernt.",
+        "warning_align_reduced": "Die gemeinsame Historie wurde automatisch bereinigt, damit der Vergleich stabil bleibt.",
+        "metric_paid_in": "Kumulative Einzahlungen",
+        "equity_label_paid_in": "Kumulative Einzahlungen",
+        "rebal_buys_col": "Käufe",
+        "rebal_sells_col": "Verkäufe",
+        "rebal_reason_col": "Logik",
+        "interpret_why_title": "Warum der Bot besser sein kann",
+        "interpret_why_text": "- **Cash-Management:** In schwächeren Marktphasen wird nicht stumpf immer voll investiert.\n- **Rebalancing-Logik:** Gewinner können nach festen Regeln neu gewichtet werden, statt ewig zufällig groß zu bleiben.\n- **Conviction-Weighting:** Stärkere Signale bekommen mehr Kapital, schwächere weniger.\n- **Trend-Filter:** Aktien unter ihrem Trend verlieren an Priorität.\n- **Verlustbegrenzung durch Auswahl:** Der Bot hält nicht automatisch den ganzen Korb gleichgewichtet wie Buy & Hold.",
+        "load_status_start": "Lade Kursdaten für {count} Assets ...",
+        "load_status_done": "{loaded} Assets geladen • {partial} mit begrenzter Historie • {skipped} übersprungen.",
         "error_no_data": "Es konnten keine gültigen Kursdaten geladen werden.",
         "error_less_than_2": "Nach dem Laden sind weniger als 2 gültige Assets übrig.",
         "error_too_few_rows": "Zu wenig gültige Daten nach Berechnung der Indikatoren.",
@@ -1165,7 +1177,7 @@ TRANSLATIONS = {
         "period": "Period",
         "period_help": "For momentum strategies, 3 to 5 years usually makes the most sense.",
         "rebalance": "Rebalancing",
-        "rebalance_options": ["Monthly", "Quarterly"],
+        "rebalance_options": ["Off", "Yearly", "Quarterly", "Monthly", "Every 2 Years", "Every 5 Years"],
         "fee": "Transaction costs per trade (%)",
         "fee_help": "Fees and slippage per rebalance.",
         "min_score": "Minimum score for buying",
@@ -1271,6 +1283,18 @@ TRANSLATIONS = {
         "spinner": "Calculating aggressive dynamic portfolio...",
         "error_min_assets": "Please enter at least 2 tickers.",
         "warning_skip": "No data for {ticker} – skipping.",
+        "warning_partial_history": "{ticker} has only limited history but will still be used.",
+        "warning_removed_after_align": "{ticker} was removed after cleanup due to too many data gaps.",
+        "warning_align_reduced": "The common history was cleaned automatically to keep the comparison stable.",
+        "metric_paid_in": "Cumulative contributions",
+        "equity_label_paid_in": "Cumulative contributions",
+        "rebal_buys_col": "Buys",
+        "rebal_sells_col": "Sells",
+        "rebal_reason_col": "Logic",
+        "interpret_why_title": "Why the bot can outperform",
+        "interpret_why_text": "- **Cash management:** In weaker market phases, the bot does not blindly stay fully invested.\n- **Rebalancing logic:** Winners can be reweighted on clear rules instead of drifting forever.\n- **Conviction weighting:** Stronger signals get more capital, weaker signals get less.\n- **Trend filter:** Assets below trend lose priority.\n- **Selection effect:** The bot does not automatically hold the full basket equally weighted like Buy & Hold.",
+        "load_status_start": "Loading price data for {count} assets ...",
+        "load_status_done": "{loaded} assets loaded • {partial} with limited history • {skipped} skipped.",
         "error_no_data": "No valid price data could be loaded.",
         "error_less_than_2": "Fewer than 2 valid assets remain after loading.",
         "error_too_few_rows": "Not enough valid data after calculating indicators.",
@@ -1458,17 +1482,18 @@ def save_active_basket_to_state():
     st.session_state.baskets[active] = st.session_state.get("assets_input", "")
 
 
+
 def get_period_metadata(period: str) -> dict:
     period = str(period).strip().lower()
     mapping = {
-        "1y": {"yf_period": "1y", "min_points": 180},
-        "2y": {"yf_period": "2y", "min_points": 300},
-        "3y": {"yf_period": "3y", "min_points": 420},
-        "5y": {"yf_period": "5y", "min_points": 700},
-        "10y": {"yf_period": "10y", "min_points": 1200},
-        "15y": {"yf_period": "15y", "min_points": 1800},
-        "20y": {"yf_period": "20y", "min_points": 2400},
-        "max": {"yf_period": "max", "min_points": 700},
+        "1y": {"yf_period": "1y", "preferred_points": 180},
+        "2y": {"yf_period": "2y", "preferred_points": 300},
+        "3y": {"yf_period": "3y", "preferred_points": 420},
+        "5y": {"yf_period": "5y", "preferred_points": 700},
+        "10y": {"yf_period": "10y", "preferred_points": 1200},
+        "15y": {"yf_period": "15y", "preferred_points": 1800},
+        "20y": {"yf_period": "20y", "preferred_points": 2400},
+        "max": {"yf_period": "max", "preferred_points": 700},
     }
     return mapping.get(period, mapping["3y"])
 
@@ -1488,18 +1513,58 @@ def _extract_close_series(raw: pd.DataFrame, ticker: str) -> pd.Series:
     s.name = ticker
     return s
 
+def _download_with_fallbacks(ticker: str, period: str) -> pd.Series:
+    candidates = [
+        {"period": period, "auto_adjust": True},
+        {"period": period, "auto_adjust": False},
+    ]
+    if period == "max":
+        candidates.extend([
+            {"period": "20y", "auto_adjust": True},
+            {"period": "10y", "auto_adjust": True},
+            {"period": "5y", "auto_adjust": True},
+        ])
+    else:
+        candidates.extend([
+            {"period": "max", "auto_adjust": True},
+            {"period": "max", "auto_adjust": False},
+        ])
+
+    best = pd.Series(dtype=float)
+    for cfg in candidates:
+        try:
+            raw = yf.download(
+                ticker,
+                period=cfg["period"],
+                progress=False,
+                auto_adjust=cfg["auto_adjust"],
+                actions=False,
+                threads=False,
+            )
+        except Exception:
+            raw = pd.DataFrame()
+        s = _extract_close_series(raw, ticker)
+        if len(s) > len(best):
+            best = s
+        if len(best) >= 180:
+            break
+    return best
+
 def load_close_prices(tickers, period, progress_bar=None, status_box=None):
     tickers = [str(t).strip() for t in tickers if str(t).strip()]
     meta = get_period_metadata(period)
     yf_period = meta["yf_period"]
-    min_points = meta["min_points"]
+    preferred_points = meta["preferred_points"]
 
     series_map = {}
     skipped = []
-    insufficient = []
+    partial_history = []
     loaded = []
 
     total = max(len(tickers), 1)
+    if status_box is not None:
+        status_box.info(T["load_status_start"].format(count=len(tickers)))
+
     for i, t in enumerate(tickers, start=1):
         if status_box is not None:
             status_box.info(
@@ -1509,26 +1574,15 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
         if progress_bar is not None:
             progress_bar.progress(i / total, text=f"{i}/{total} • {t}")
 
-        try:
-            raw = yf.download(
-                t,
-                period=yf_period,
-                progress=False,
-                auto_adjust=True,
-                actions=False,
-                threads=False,
-            )
-        except Exception:
-            raw = pd.DataFrame()
+        s = _download_with_fallbacks(t, yf_period)
 
-        s = _extract_close_series(raw, t)
         if s.empty:
             skipped.append(t)
             continue
 
-        if len(s) < min_points:
-            insufficient.append(t)
-            continue
+        # Always keep high-quality large tickers when data exists
+        if len(s) < preferred_points:
+            partial_history.append(t)
 
         series_map[t] = s
         loaded.append(t)
@@ -1536,21 +1590,17 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
     if progress_bar is not None:
         progress_bar.empty()
     if status_box is not None:
-        if loaded:
-            status_box.success(
-                f"✅ {len(loaded)} Assets geladen." if st.session_state.get("language", "DE") == "DE"
-                else f"✅ Loaded {len(loaded)} assets."
+        status_box.success(
+            T["load_status_done"].format(
+                loaded=len(loaded),
+                partial=len(partial_history),
+                skipped=len(skipped),
             )
-        else:
-            status_box.warning(
-                "⚠️ Es konnten keine ausreichenden Kursdaten geladen werden."
-                if st.session_state.get("language", "DE") == "DE"
-                else "⚠️ No sufficient price history could be loaded."
-            )
+        )
 
-    return series_map, skipped, insufficient
+    return series_map, skipped, partial_history
 
-def align_price_series(series_map, min_non_na_ratio: float = 0.85):
+def align_price_series(series_map, min_overlap_ratio: float = 0.55, ff_limit: int = 5):
     if not series_map:
         return pd.DataFrame(), []
 
@@ -1558,61 +1608,55 @@ def align_price_series(series_map, min_non_na_ratio: float = 0.85):
     prices = prices[~prices.index.duplicated(keep="last")]
     prices = prices.replace([np.inf, -np.inf], np.nan)
 
-    valid_cols = []
+    total_rows = len(prices.index)
+    keep_cols = []
     dropped_cols = []
 
-    total_rows = len(prices.index)
     for col in prices.columns:
         s = prices[col].dropna()
-        if s.empty:
+        if len(s) < 120:
             dropped_cols.append(col)
             continue
         coverage = len(s) / max(total_rows, 1)
-        if coverage < min_non_na_ratio:
+        if coverage < 0.10:
             dropped_cols.append(col)
             continue
-        valid_cols.append(col)
+        keep_cols.append(col)
 
-    if not valid_cols:
+    if not keep_cols:
         return pd.DataFrame(), list(prices.columns)
 
-    trimmed = prices[valid_cols].copy()
+    trimmed = prices[keep_cols].copy()
+    trimmed = trimmed.ffill(limit=ff_limit)
 
-    common_start = max(trimmed[col].first_valid_index() for col in trimmed.columns)
-    common_end = min(trimmed[col].last_valid_index() for col in trimmed.columns)
-    trimmed = trimmed.loc[common_start:common_end].copy()
-    trimmed = trimmed.ffill(limit=3).dropna(axis=0, how="any")
+    valid_row_counts = trimmed.notna().sum(axis=1)
+    min_required = max(2, int(np.ceil(len(trimmed.columns) * min_overlap_ratio)))
+    trimmed = trimmed.loc[valid_row_counts >= min_required].copy()
 
-    valid_final = []
-    dropped_final = dropped_cols[:]
+    if trimmed.empty:
+        return pd.DataFrame(), list(set(list(prices.columns) + dropped_cols))
+
+    # Remove columns that still have too many gaps after overlap filtering
+    final_keep = []
     for col in trimmed.columns:
-        s = trimmed[col].dropna()
-        if len(s) < 180:
-            dropped_final.append(col)
+        coverage = trimmed[col].notna().mean()
+        if coverage >= 0.85:
+            final_keep.append(col)
         else:
-            valid_final.append(col)
+            dropped_cols.append(col)
 
-    if not valid_final:
-        return pd.DataFrame(), list(set(list(prices.columns) + dropped_final))
+    if not final_keep:
+        return pd.DataFrame(), list(set(list(prices.columns) + dropped_cols))
 
-    trimmed = trimmed[valid_final].copy()
-    return trimmed, sorted(set(dropped_final))
+    trimmed = trimmed[final_keep].copy().dropna(axis=0, how="any")
+    return trimmed, sorted(set(dropped_cols))
 
 def load_single_close(ticker, period):
-    try:
-        raw = yf.download(
-            ticker,
-            period=get_period_metadata(period)["yf_period"],
-            progress=False,
-            auto_adjust=True,
-            actions=False,
-            threads=False,
-        )
-    except Exception:
-        return pd.Series(dtype=float)
-    return _extract_close_series(raw, ticker)
+    s = _download_with_fallbacks(ticker, get_period_metadata(period)["yf_period"])
+    return s
 
 def compute_metrics(equity: pd.Series):
+
 
     returns = equity.pct_change().fillna(0)
     total_return = (equity.iloc[-1] / equity.iloc[0] - 1) * 100
@@ -1638,12 +1682,20 @@ def compute_metrics(equity: pd.Series):
     }
 
 def is_rebalance_day(current_date, prev_date, mode):
+    if mode in ("Aus", "Off"):
+        return False
     if mode in ("Monatlich", "Monthly"):
-        return current_date.month != prev_date.month
+        return current_date.month != prev_date.month or current_date.year != prev_date.year
     if mode in ("Quartalsweise", "Quarterly"):
         prev_q = (prev_date.month - 1) // 3
         curr_q = (current_date.month - 1) // 3
         return (current_date.year != prev_date.year) or (curr_q != prev_q)
+    if mode in ("Jährlich", "Yearly"):
+        return current_date.year != prev_date.year
+    if mode in ("Alle 2 Jahre", "Every 2 Years"):
+        return current_date.year != prev_date.year and current_date.year % 2 == 0
+    if mode in ("Alle 5 Jahre", "Every 5 Years"):
+        return current_date.year != prev_date.year and current_date.year % 5 == 0
     return False
 
 def conviction_weights(score_series: pd.Series, max_weight: float, power: float) -> pd.Series:
@@ -2481,7 +2533,7 @@ if st.sidebar.button(T["calculate"], type="primary"):
         load_progress = st.progress(0, text="0%")
         load_status = st.empty()
 
-        series_map, skipped_tickers, insufficient_tickers = load_close_prices(
+        series_map, skipped_tickers, partial_history_tickers = load_close_prices(
             tickers,
             period,
             progress_bar=load_progress,
@@ -2490,25 +2542,15 @@ if st.sidebar.button(T["calculate"], type="primary"):
 
         for skipped in skipped_tickers:
             st.warning(T["warning_skip"].format(ticker=skipped))
-        for skipped in insufficient_tickers:
-            st.warning(
-                (
-                    f"Zu wenig Historie für {skipped} – Asset wird automatisch entfernt."
-                    if lang == "DE"
-                    else f"Not enough history for {skipped} – asset removed automatically."
-                )
-            )
+        for partial_ticker in partial_history_tickers:
+            st.info(T["warning_partial_history"].format(ticker=partial_ticker))
 
         prices, dropped_after_align = align_price_series(series_map)
+        if dropped_after_align:
+            st.info(T["warning_align_reduced"])
         for skipped in dropped_after_align:
-            if skipped not in skipped_tickers and skipped not in insufficient_tickers:
-                st.warning(
-                    (
-                        f"{skipped} wurde wegen zu vieler Lücken oder zu kurzer gemeinsamer Historie entfernt."
-                        if lang == "DE"
-                        else f"{skipped} was removed because of too many gaps or too little common history."
-                    )
-                )
+            if skipped not in skipped_tickers:
+                st.warning(T["warning_removed_after_align"].format(ticker=skipped))
 
         if prices.empty:
             st.error(T["error_no_data"])
@@ -2561,6 +2603,7 @@ if st.sidebar.button(T["calculate"], type="primary"):
         invested_bot = pd.Series(index=dates, dtype=float)
         weight_history = pd.DataFrame(index=dates, columns=tickers, dtype=float)
         cash_weight_history = pd.Series(index=dates, dtype=float)
+        cumulative_contributions = pd.Series(index=dates, dtype=float)
 
         selected_assets_log = {}
         target_weights_log = {}
@@ -2673,20 +2716,41 @@ if st.sidebar.button(T["calculate"], type="primary"):
                     for tkr in tickers:
                         target_values[tkr] *= fee_adjustment
 
+                buy_actions = []
+                sell_actions = []
+
                 for tkr in tickers:
                     price = current_prices[tkr]
                     new_shares = target_values[tkr] / price if price > 0 else 0.0
-                    if abs(new_shares - shares[tkr]) > 1e-12:
+                    delta_shares = new_shares - shares[tkr]
+                    delta_value = target_values[tkr] - current_values[tkr]
+                    if abs(delta_shares) > 1e-12:
                         trade_count += 1
+                        if delta_value > 1e-6:
+                            buy_actions.append(f"{tkr} (+{delta_value:,.0f}€)")
+                        elif delta_value < -1e-6:
+                            sell_actions.append(f"{tkr} ({delta_value:,.0f}€)")
                     shares[tkr] = new_shares
 
                 invested_value = sum(shares[tkr] * current_prices[tkr] for tkr in tickers)
                 cash = total_equity_after_fees - invested_value
 
+                if not regime_today_ok:
+                    rebalance_reason = "Regime-Filter / Defensive Phase" if lang == "DE" else "Regime filter / defensive phase"
+                elif selected_assets_log.get(date):
+                    rebalance_reason = "Top-Assets nach Score & Trend gewichtet" if lang == "DE" else "Top assets weighted by score & trend"
+                elif soft_cash_mode:
+                    rebalance_reason = "Soft Cash Fallback" if lang == "DE" else "Soft cash fallback"
+                else:
+                    rebalance_reason = "Cash / keine starken Signale" if lang == "DE" else "Cash / no strong signals"
+
                 rebalance_log.append({
                     T["date_col"]: date,
                     T["regime_ok_col"]: regime_today_ok,
                     T["selected_assets_col"]: ", ".join(selected_assets_log.get(date, [])) if selected_assets_log.get(date, []) else "Cash",
+                    T["rebal_buys_col"]: ", ".join(buy_actions) if buy_actions else "—",
+                    T["rebal_sells_col"]: ", ".join(sell_actions) if sell_actions else "—",
+                    T["rebal_reason_col"]: rebalance_reason,
                     T["turnover_col"]: float(turnover),
                     T["fees_col"]: float(fees),
                     T["cash_eur_col"]: float(cash),
@@ -2699,6 +2763,8 @@ if st.sidebar.button(T["calculate"], type="primary"):
             equity_bot.loc[date] = total_value
             cash_bot.loc[date] = cash
             invested_bot.loc[date] = invested_value
+            months_elapsed = (date.year - dates[0].year) * 12 + (date.month - dates[0].month)
+            cumulative_contributions.loc[date] = float(initial_capital + max(0, months_elapsed) * monthly_savings)
 
             if total_value > 0:
                 for tkr in tickers:
@@ -2784,16 +2850,17 @@ if st.sidebar.button(T["calculate"], type="primary"):
         c4.metric(T["metric_trades"], f"{trade_count}")
 
         c5, c6, c7, c8 = st.columns(4)
-        c5.metric(T["metric_bot_return"], f"{bot_metrics['total_return']:.2f}%")
+        c5.metric(T["metric_paid_in"], f"{cumulative_contributions.iloc[-1]:,.2f} €")
         c6.metric(T["metric_bh_return"], f"{bh_metrics['total_return']:.2f}%")
         c7.metric(T["metric_exposure"], f"{exposure:.1f}%")
         c8.metric(T["metric_cash"], f"{avg_cash_quote:.1f}%")
 
-        c9, c10, c11, c12 = st.columns(4)
-        c9.metric(T["metric_cagr"], f"{bot_metrics['cagr']:.2f}%")
-        c10.metric(T["metric_dd"], f"{bot_metrics['max_dd']:.2f}%")
-        c11.metric(T["metric_vol"], f"{bot_metrics['volatility']:.2f}%")
-        c12.metric(T["metric_sharpe"], f"{bot_metrics['sharpe']:.2f}")
+        c9, c10, c11, c12, c13 = st.columns(5)
+        c9.metric(T["metric_bot_return"], f"{bot_metrics['total_return']:.2f}%")
+        c10.metric(T["metric_cagr"], f"{bot_metrics['cagr']:.2f}%")
+        c11.metric(T["metric_dd"], f"{bot_metrics['max_dd']:.2f}%")
+        c12.metric(T["metric_vol"], f"{bot_metrics['volatility']:.2f}%")
+        c13.metric(T["metric_sharpe"], f"{bot_metrics['sharpe']:.2f}")
 
         st.success(T["end_capital_success"].format(value=f"{equity_bot.iloc[-1]:,.2f} €"))
 
@@ -2819,6 +2886,16 @@ if st.sidebar.button(T["calculate"], type="primary"):
                 hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_bh"] + "</extra>",
             )
         )
+        equity_fig.add_trace(
+            go.Scatter(
+                x=cumulative_contributions.index,
+                y=cumulative_contributions.values,
+                mode="lines",
+                name=T["equity_label_paid_in"],
+                line=dict(width=2, dash="dot", color="gray"),
+                hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_paid_in"] + "</extra>",
+            )
+        )
         equity_fig.update_layout(
             title=T["equity_title"],
             template="plotly_dark",
@@ -2838,6 +2915,7 @@ if st.sidebar.button(T["calculate"], type="primary"):
             T["date_col"]: equity_bot.index,
             T["bot_portfolio_label"]: equity_bot.values,
             T["buy_hold_label"]: equity_bh.values,
+            T["equity_label_paid_in"]: cumulative_contributions.values,
             T["bh_cash_label"]: cash_bot.values,
             T["invested_label"]: invested_bot.values,
         })
@@ -2891,6 +2969,8 @@ if st.sidebar.button(T["calculate"], type="primary"):
                     cash_ceiling=target_cash_ceiling_pct,
                 )
             )
+            st.markdown(f"### {T['interpret_why_title']}")
+            st.markdown(T["interpret_why_text"])
 
         st.subheader(T["current_weights"])
         active_weights_df = weights_df[weights_df[T["weights_current_col"]] > 0].copy()
