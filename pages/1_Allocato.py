@@ -525,16 +525,16 @@ defaults = {
     "rebalance_freq": "Monatlich",
     "fee_pct_input": 0.10,
     "min_score": 0.00,
-    "max_weight_pct": 40,
+    "max_weight_pct": 35,
     "vol_penalty": 0.08,
     "cash_interest_pct": 0.00,
     "use_regime_filter": False,
     "show_debug": False,
-    "conviction_power": 1.9,
+    "conviction_power": 1.8,
     "soft_cash_mode": True,
-    "target_cash_floor_pct": 1,
+    "target_cash_floor_pct": 2,
     "target_cash_ceiling_pct": 8,
-    "soft_cash_invest_ratio_pct": 95,
+    "soft_cash_invest_ratio_pct": 98,
     "weight_chart_top_n": 8,
     "top_n": 8,
     "assets_input": "AAPL\nSAP.DE\nSIE.DE\nALV.DE\nMUV2.DE\nJNJ\nPG",
@@ -699,15 +699,15 @@ PRESETS = {
     "Quality": {
         "assets_input": "AAPL\nSAP.DE\nSIE.DE\nALV.DE\nMUV2.DE\nJNJ\nPG",
         "top_n": 4,
-        "conviction_power": 1.9,
-        "max_weight_pct": 55,
+        "conviction_power": 1.8,
+        "max_weight_pct": 35,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
         "min_score": 0.00,
         "soft_cash_mode": True,
-        "target_cash_floor_pct": 5,
-        "target_cash_ceiling_pct": 15,
-        "soft_cash_invest_ratio_pct": 85,
+        "target_cash_floor_pct": 2,
+        "target_cash_ceiling_pct": 8,
+        "soft_cash_invest_ratio_pct": 98,
     },
     "Global": {
         "assets_input": (
@@ -717,14 +717,14 @@ PRESETS = {
         ),
         "top_n": 5,
         "conviction_power": 2.0,
-        "max_weight_pct": 55,
+        "max_weight_pct": 35,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
         "min_score": 0.00,
         "soft_cash_mode": True,
-        "target_cash_floor_pct": 5,
-        "target_cash_ceiling_pct": 15,
-        "soft_cash_invest_ratio_pct": 85,
+        "target_cash_floor_pct": 2,
+        "target_cash_ceiling_pct": 8,
+        "soft_cash_invest_ratio_pct": 98,
     },
     "Europa": {
         "assets_input": (
@@ -733,14 +733,14 @@ PRESETS = {
         ),
         "top_n": 5,
         "conviction_power": 2.0,
-        "max_weight_pct": 50,
+        "max_weight_pct": 35,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
         "min_score": 0.00,
         "soft_cash_mode": True,
-        "target_cash_floor_pct": 8,
-        "target_cash_ceiling_pct": 18,
-        "soft_cash_invest_ratio_pct": 85,
+        "target_cash_floor_pct": 2,
+        "target_cash_ceiling_pct": 8,
+        "soft_cash_invest_ratio_pct": 98,
     },
     "Dividend": {
         "assets_input": (
@@ -748,15 +748,15 @@ PRESETS = {
             "V\nMA\nJPM\nBAC\nGS\nMS\nC\nAXP\nSPY\nQQQ\nSAP.DE\nSIE.DE\nALV.DE\nMUV2.DE"
         ),
         "top_n": 6,
-        "conviction_power": 1.9,
-        "max_weight_pct": 50,
+        "conviction_power": 1.8,
+        "max_weight_pct": 35,
         "vol_penalty": 0.08,
         "rebalance_freq": "Monatlich",
         "min_score": 0.00,
         "soft_cash_mode": True,
-        "target_cash_floor_pct": 7,
-        "target_cash_ceiling_pct": 15,
-        "soft_cash_invest_ratio_pct": 85,
+        "target_cash_floor_pct": 2,
+        "target_cash_ceiling_pct": 8,
+        "soft_cash_invest_ratio_pct": 98,
     },
 }
 
@@ -1688,8 +1688,8 @@ def get_backtest_floor_date(period: str) -> pd.Timestamp | None:
 
 
 NUMERIC_EPS = 1e-12
-MAX_SAFE_DAILY_RETURN = 1.50
-MIN_SAFE_DAILY_RETURN = -0.95
+MAX_SAFE_DAILY_RETURN = 0.50
+MIN_SAFE_DAILY_RETURN = -0.50
 
 def safe_float(value, default: float = 0.0) -> float:
     try:
@@ -1715,7 +1715,7 @@ def safe_log_growth_from_return(ret: float, min_ret: float = MIN_SAFE_DAILY_RETU
     r = float(np.clip(r, min_ret, max_ret))
     return float(np.log1p(r))
 
-def sanitize_price_panel(prices: pd.DataFrame, max_daily_return: float = 5.0, min_daily_return: float = -0.95) -> pd.DataFrame:
+def sanitize_price_panel(prices: pd.DataFrame, max_daily_return: float = 0.50, min_daily_return: float = -0.50) -> pd.DataFrame:
     if prices is None or prices.empty:
         return pd.DataFrame()
 
@@ -1767,49 +1767,47 @@ def stabilize_equity_series(
     max_daily_return: float = MAX_SAFE_DAILY_RETURN,
     equity_cap: float | None = None,
 ) -> pd.Series:
-    eq = pd.to_numeric(equity, errors="coerce").replace([np.inf, -np.inf], np.nan).copy()
-    eq = eq.reindex(flows.index)
-    out = pd.Series(index=flows.index, dtype=float)
+    eq = pd.to_numeric(equity, errors="coerce").replace([np.inf, -np.inf], np.nan).reindex(flows.index)
+    fl = pd.to_numeric(flows, errors="coerce").replace([np.inf, -np.inf], np.nan).reindex(eq.index).fillna(0.0)
 
-    if len(eq) == 0:
+    if eq.empty:
         return pd.Series(dtype=float)
 
-    first_flow = max(0.0, safe_float(flows.iloc[0], default=0.0))
-    first_val = safe_float(eq.iloc[0], default=first_flow)
-    if first_val <= 0:
-        first_val = max(first_flow, 0.0)
-
+    first_equity = max(0.0, safe_float(eq.iloc[0], default=0.0), safe_float(fl.iloc[0], default=0.0))
     if equity_cap is not None:
-        first_val = min(first_val, equity_cap)
+        first_equity = min(first_equity, equity_cap)
 
-    out.iloc[0] = first_val
+    out = pd.Series(index=eq.index, dtype=float)
+    out.iloc[0] = first_equity
 
     for i in range(1, len(eq)):
-        prev_raw = safe_float(eq.iloc[i - 1], default=out.iloc[i - 1])
-        curr_raw = safe_float(eq.iloc[i], default=prev_raw)
-        flow = safe_float(flows.iloc[i], default=0.0)
+        prev_equity = max(safe_float(out.iloc[i - 1], default=0.0), 0.0)
+        flow_i = safe_float(fl.iloc[i], default=0.0)
+        growth_base = max(prev_equity + flow_i, NUMERIC_EPS)
 
-        prev_stable = max(safe_float(out.iloc[i - 1], default=0.0), 0.0)
-        base_capital = max(prev_stable + flow, 0.0)
+        raw_equity = safe_float(eq.iloc[i], default=growth_base)
+        if not np.isfinite(raw_equity) or raw_equity <= 0:
+            raw_equity = growth_base
 
-        raw_ret = safe_div(curr_raw - prev_raw - flow, prev_raw, default=0.0)
-        log_growth = safe_log_growth_from_return(raw_ret, min_ret=min_daily_return, max_ret=max_daily_return)
-        next_val = base_capital * float(np.exp(log_growth))
+        daily_ret = safe_div(raw_equity - growth_base, growth_base, default=0.0)
+        daily_ret = float(np.clip(daily_ret, min_daily_return, max_daily_return))
 
-        if not np.isfinite(next_val):
-            next_val = base_capital
-        next_val = max(next_val, 0.0)
+        stable_equity = growth_base * float(np.exp(np.log1p(daily_ret)))
+        if not np.isfinite(stable_equity):
+            stable_equity = growth_base
+        stable_equity = max(stable_equity, 0.0)
 
         if equity_cap is not None:
-            next_val = min(next_val, equity_cap)
+            stable_equity = min(stable_equity, equity_cap)
 
-        out.iloc[i] = next_val
+        out.iloc[i] = stable_equity
 
     return out.ffill().fillna(0.0)
 
 def safe_portfolio_cap(initial_capital: float, monthly_savings: float, periods: int) -> float:
     total_contrib = float(initial_capital) + max(0, periods) * float(monthly_savings)
-    return max(total_contrib * 10000.0, 100000000.0)
+    realistic_cap = max(total_contrib * 100.0, 1_000_000.0)
+    return realistic_cap
 
 
 def _safe_series_history_stats(series_map: dict) -> pd.DataFrame:
@@ -2080,7 +2078,7 @@ def load_benchmark_series_bulk(tickers_tuple, period: str):
 
 def compute_metrics(equity: pd.Series):
     eq = pd.to_numeric(equity, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().copy()
-    eq = eq[eq > 0]
+    eq = eq.clip(lower=NUMERIC_EPS)
     if eq.empty or len(eq) < 2:
         return {
             "total_return": 0.0,
@@ -2090,22 +2088,16 @@ def compute_metrics(equity: pd.Series):
             "sharpe": 0.0,
         }
 
-    ratios = (eq / eq.shift(1)).replace([np.inf, -np.inf], np.nan)
-    ratios = ratios.where(ratios > 0)
-    log_returns = np.log(ratios).replace([np.inf, -np.inf], np.nan).dropna()
-    if log_returns.empty:
-        log_returns = pd.Series(0.0, index=eq.index[1:])
+    daily_ret = eq.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    daily_ret = daily_ret.clip(lower=MIN_SAFE_DAILY_RETURN, upper=MAX_SAFE_DAILY_RETURN)
+    log_returns = np.log1p(daily_ret).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    log_returns = log_returns.clip(
-        lower=np.log1p(MIN_SAFE_DAILY_RETURN),
-        upper=np.log1p(MAX_SAFE_DAILY_RETURN),
-    )
+    total_log_return = float(log_returns.iloc[1:].sum()) if len(log_returns) > 1 else 0.0
+    try:
+        years = max((pd.Timestamp(eq.index[-1]) - pd.Timestamp(eq.index[0])).days / 365.25, 1.0 / 252.0)
+    except Exception:
+        years = max(len(eq) / 252.0, 1.0 / 252.0)
 
-    start_val = max(safe_float(eq.iloc[0], default=0.0), NUMERIC_EPS)
-    end_val = max(safe_float(eq.iloc[-1], default=0.0), NUMERIC_EPS)
-    years = max(len(eq) / 252.0, 1.0 / 252.0)
-
-    total_log_return = float(np.clip(np.log(end_val / start_val), -50.0, 50.0))
     total_return = (np.exp(total_log_return) - 1.0) * 100.0
     cagr = (np.exp(total_log_return / years) - 1.0) * 100.0
 
@@ -2114,14 +2106,14 @@ def compute_metrics(equity: pd.Series):
     max_dd = float(drawdown.min()) if not drawdown.empty else 0.0
 
     vol = float(log_returns.std(ddof=0) * np.sqrt(252) * 100.0) if len(log_returns) > 1 else 0.0
-    sharpe = float((log_returns.mean() / log_returns.std(ddof=0)) * np.sqrt(252)) if len(log_returns) > 1 and log_returns.std(ddof=0) > 0 else 0.0
+    sharpe = float((log_returns.mean() / log_returns.std(ddof=0)) * np.sqrt(252)) if len(log_returns) > 1 and log_returns.std(ddof=0) > NUMERIC_EPS else 0.0
 
     return {
-        "total_return": float(np.nan_to_num(np.clip(total_return, -100.0, 1_000_000.0), nan=0.0, posinf=0.0, neginf=0.0)),
-        "cagr": float(np.nan_to_num(np.clip(cagr, -100.0, 10_000.0), nan=0.0, posinf=0.0, neginf=0.0)),
+        "total_return": float(np.nan_to_num(np.clip(total_return, -100.0, 5000.0), nan=0.0, posinf=0.0, neginf=0.0)),
+        "cagr": float(np.nan_to_num(np.clip(cagr, -100.0, 150.0), nan=0.0, posinf=0.0, neginf=0.0)),
         "max_dd": float(np.nan_to_num(np.clip(max_dd, -100.0, 0.0), nan=0.0, posinf=0.0, neginf=0.0)),
-        "volatility": float(np.nan_to_num(np.clip(vol, 0.0, 1_000.0), nan=0.0, posinf=0.0, neginf=0.0)),
-        "sharpe": float(np.nan_to_num(np.clip(sharpe, -100.0, 100.0), nan=0.0, posinf=0.0, neginf=0.0)),
+        "volatility": float(np.nan_to_num(np.clip(vol, 0.0, 250.0), nan=0.0, posinf=0.0, neginf=0.0)),
+        "sharpe": float(np.nan_to_num(np.clip(sharpe, -20.0, 20.0), nan=0.0, posinf=0.0, neginf=0.0)),
     }
 
 def is_rebalance_day(current_date, prev_date, mode):
@@ -2146,28 +2138,33 @@ def conviction_weights(score_series: pd.Series, max_weight: float, power: float)
     s = s[s > 0].copy()
     if s.empty:
         return s
-    s = s ** power
+    hard_cap = min(max_weight, 0.40)
+    s = (s.clip(lower=0.0) + 1e-9) ** max(1.0, min(power, 2.8))
     s = s / s.sum()
-    final = pd.Series(0.0, index=s.index)
+    final = pd.Series(0.0, index=s.index, dtype=float)
     remaining = 1.0
     active = s.copy()
     while len(active) > 0 and remaining > 1e-12:
         active = active / active.sum()
         proposed = active * remaining
-        capped_mask = proposed >= max_weight - 1e-12
+        capped_mask = proposed >= hard_cap - 1e-12
         if not capped_mask.any():
             final.loc[active.index] += proposed
             remaining = 0.0
             break
         capped_assets = proposed[capped_mask].index.tolist()
         for asset in capped_assets:
-            addable = max_weight - final.loc[asset]
+            addable = max(0.0, hard_cap - final.loc[asset])
             if addable > 0:
                 final.loc[asset] += addable
                 remaining -= addable
         active = active.drop(index=capped_assets, errors="ignore")
-        if remaining <= 1e-12:
-            break
+    if remaining > 1e-12 and len(final) > 0:
+        under_cap = final[final < hard_cap - 1e-12].index.tolist()
+        if under_cap:
+            add = remaining / len(under_cap)
+            for asset in under_cap:
+                final.loc[asset] += min(add, hard_cap - final.loc[asset])
     if final.sum() > 0:
         final = final / final.sum()
     return final
@@ -2596,11 +2593,14 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     prices = sanitize_price_panel(prices.sort_index().copy())
     tickers = list(prices.columns)
     effective_top_n = min(top_n, len(tickers))
+    max_weight_pct = int(np.clip(max_weight_pct, 1, 40))
     max_weight = max_weight_pct / 100.0
     daily_cash_rate = (cash_interest_pct / 100.0) / 252.0
-    cash_floor = target_cash_floor_pct / 100.0
-    cash_ceiling = target_cash_ceiling_pct / 100.0
-    soft_invest_ratio = soft_cash_invest_ratio_pct / 100.0
+    cash_floor = max(target_cash_floor_pct / 100.0, 0.02)
+    cash_ceiling = min(max(target_cash_ceiling_pct / 100.0, 0.08), 0.12)
+    if cash_floor > cash_ceiling:
+        cash_floor = min(cash_floor, cash_ceiling)
+    soft_invest_ratio = max(soft_cash_invest_ratio_pct / 100.0, 0.98 if soft_cash_mode else 0.90)
     tax_rate = 0.26375
     bot_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
     bh_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
@@ -4025,7 +4025,7 @@ min_score = st.sidebar.number_input(
 max_weight_pct = st.sidebar.number_input(
     T["max_weight"],
     min_value=1,
-    max_value=100,
+    max_value=40,
     step=5,
     key="max_weight_pct",
     help=T["max_weight_help"],
