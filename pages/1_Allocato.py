@@ -5,6 +5,7 @@ import hashlib
 import re
 from datetime import datetime, timedelta
 from urllib.parse import quote
+from urllib import request as urllib_request, error as urllib_error
 
 import streamlit as st
 import yfinance as yf
@@ -541,6 +542,7 @@ defaults = {
     "asset_search_select": None,
     "benchmark_etfs_input": "SPY\nQQQ",
     "simulate_taxes_de": False,
+    "enable_ki_explanations": False,
 }
 
 for k, v in defaults.items():
@@ -611,6 +613,7 @@ PERSISTENT_STATE_KEYS = [
     "asset_search_select",
     "benchmark_etfs_input",
     "simulate_taxes_de",
+    "enable_ki_explanations",
     "subscription_expires_at",
     "_pending_preset",
     "baskets",
@@ -1016,6 +1019,10 @@ TRANSLATIONS = {
         "benchmark_added_title": "Zusätzliche ETF-Benchmarks",
         "simulate_taxes_de": "Steuern DE simulieren (26,375 %)",
         "simulate_taxes_de_help": "Simuliert Abgeltungsteuer auf realisierte Gewinne mit 1.000 € Freistellungsbetrag pro Jahr und Average-Cost-Methode.",
+        "enable_ki_explanations": "KI-Erklärungen aktivieren",
+        "enable_ki_explanations_help": "Nutzen Grok über die xAI API für kurze Erklärungen zu den zuletzt ausgewählten Top-Assets.",
+        "ki_explanations_title": "🤖 KI-Erklärungen zu den Top-Assets",
+        "ki_explanations_missing_key": "GROK_API_KEY fehlt in st.secrets – es wird die lokale Fallback-Erklärung genutzt.",
         "taxes_col": "Steuern €",
         "tax_note_title": "Steuern & Realismus",
         "tax_note_text": "- Aktivierte Steuern belasten realisierte Gewinne des Bots sofort über Cash.\n- Verwendet wird die Average-Cost-Methode für Einstandspreise.\n- Pro Kalenderjahr werden automatisch 1.000 € Freistellungsbetrag berücksichtigt.\n- Buy & Hold realisiert in dieser Simulation kaum Gewinne, weil Positionen fast nie verkauft werden. Dadurch wird der Vergleich realistischer und der Bot weniger künstlich bevorzugt.",
@@ -1319,6 +1326,10 @@ TRANSLATIONS = {
         "benchmark_added_title": "Additional ETF benchmarks",
         "simulate_taxes_de": "Simulate German taxes (26.375%)",
         "simulate_taxes_de_help": "Simulates capital gains tax on realized profits with a €1,000 annual allowance and average-cost accounting.",
+        "enable_ki_explanations": "Enable AI explanations",
+        "enable_ki_explanations_help": "Use Grok via the xAI API for short explanations of the most recently selected top assets.",
+        "ki_explanations_title": "🤖 AI explanations for the top assets",
+        "ki_explanations_missing_key": "GROK_API_KEY is missing in st.secrets – using the local fallback explanation instead.",
         "taxes_col": "Taxes €",
         "tax_note_title": "Taxes & realism",
         "tax_note_text": "- Enabled taxes reduce bot cash immediately when gains are realized.\n- The simulation uses an average-cost basis.\n- A €1,000 yearly allowance is applied automatically.\n- Buy & Hold realizes very few gains in this setup because positions are rarely sold. That makes the comparison more realistic and prevents an artificial bot advantage.",
@@ -1733,7 +1744,8 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
 
     return series_map, skipped, partial_history
 
-def align_price_series(series_map, min_overlap_ratio: float = 0.55, ff_limit: int = 5):
+
+def align_price_series(series_map, min_overlap_ratio: float = 0.18, ff_limit: int = 7):
     if not series_map:
         return pd.DataFrame(), []
 
@@ -1747,11 +1759,11 @@ def align_price_series(series_map, min_overlap_ratio: float = 0.55, ff_limit: in
 
     for col in prices.columns:
         s = prices[col].dropna()
-        if len(s) < 120:
+        if len(s) < 40:
             dropped_cols.append(col)
             continue
         coverage = len(s) / max(total_rows, 1)
-        if coverage < 0.10:
+        if coverage < 0.03:
             dropped_cols.append(col)
             continue
         keep_cols.append(col)
@@ -1760,7 +1772,7 @@ def align_price_series(series_map, min_overlap_ratio: float = 0.55, ff_limit: in
         return pd.DataFrame(), list(prices.columns)
 
     trimmed = prices[keep_cols].copy()
-    trimmed = trimmed.ffill(limit=ff_limit)
+    trimmed = trimmed.ffill(limit=ff_limit).bfill(limit=2)
 
     valid_row_counts = trimmed.notna().sum(axis=1)
     min_required = max(2, int(np.ceil(len(trimmed.columns) * min_overlap_ratio)))
@@ -1769,11 +1781,10 @@ def align_price_series(series_map, min_overlap_ratio: float = 0.55, ff_limit: in
     if trimmed.empty:
         return pd.DataFrame(), list(set(list(prices.columns) + dropped_cols))
 
-    # Remove columns that still have too many gaps after overlap filtering
     final_keep = []
     for col in trimmed.columns:
         coverage = trimmed[col].notna().mean()
-        if coverage >= 0.85:
+        if coverage >= 0.18:
             final_keep.append(col)
         else:
             dropped_cols.append(col)
@@ -1781,7 +1792,10 @@ def align_price_series(series_map, min_overlap_ratio: float = 0.55, ff_limit: in
     if not final_keep:
         return pd.DataFrame(), list(set(list(prices.columns) + dropped_cols))
 
-    trimmed = trimmed[final_keep].copy().dropna(axis=0, how="any")
+    trimmed = trimmed[final_keep].copy()
+    valid_row_counts = trimmed.notna().sum(axis=1)
+    min_required = max(2, min(len(trimmed.columns), int(np.ceil(len(trimmed.columns) * min_overlap_ratio))))
+    trimmed = trimmed.loc[valid_row_counts >= min_required].copy()
     return trimmed, sorted(set(dropped_cols))
 
 def load_single_close(ticker, period):
@@ -2023,30 +2037,30 @@ def get_regime_profile(regime_code: str) -> dict:
     profiles = {
         "BULL": {
             "score_weights": {"trend": 0.24, "momentum": 0.34, "quality": 0.10, "risk": 0.12, "regime_fit": 0.20},
-            "cash_target": 0.03,
-            "min_score": 45.0,
-            "invest_ratio": 0.98,
+            "cash_target": 0.00,
+            "min_score": 38.0,
+            "invest_ratio": 1.00,
             "strategy": "Trend + Breakout Momentum",
         },
         "TRANSITION": {
             "score_weights": {"trend": 0.24, "momentum": 0.20, "quality": 0.22, "risk": 0.18, "regime_fit": 0.16},
-            "cash_target": 0.10,
-            "min_score": 52.0,
-            "invest_ratio": 0.82,
+            "cash_target": 0.04,
+            "min_score": 42.0,
+            "invest_ratio": 0.96,
             "strategy": "Quality + Momentum",
         },
         "BEAR": {
             "score_weights": {"trend": 0.18, "momentum": 0.12, "quality": 0.24, "risk": 0.28, "regime_fit": 0.18},
-            "cash_target": 0.38,
-            "min_score": 58.0,
-            "invest_ratio": 0.52,
+            "cash_target": 0.12,
+            "min_score": 44.0,
+            "invest_ratio": 0.88,
             "strategy": "Defensive Rotation",
         },
         "RECOVERY": {
             "score_weights": {"trend": 0.26, "momentum": 0.26, "quality": 0.14, "risk": 0.12, "regime_fit": 0.22},
-            "cash_target": 0.08,
-            "min_score": 50.0,
-            "invest_ratio": 0.90,
+            "cash_target": 0.02,
+            "min_score": 40.0,
+            "invest_ratio": 1.00,
             "strategy": "Recovery Re-Entry",
         },
     }
@@ -2057,11 +2071,11 @@ def compute_component_score_table(prices: pd.DataFrame, regime_df: pd.DataFrame,
     ret_63 = prices / prices.shift(63) - 1.0
     ret_126 = prices / prices.shift(126) - 1.0
     ret_252 = prices / prices.shift(252) - 1.0
-    sma50 = prices.rolling(50).mean()
-    sma200 = prices.rolling(200).mean()
-    vol_63 = prices.pct_change().rolling(63).std() * np.sqrt(252)
-    dd_126 = prices / prices.rolling(126).max() - 1.0
-    pos_days_63 = (prices.pct_change() > 0).rolling(63).mean()
+    sma50 = prices.rolling(50, min_periods=20).mean()
+    sma200 = prices.rolling(200, min_periods=60).mean()
+    vol_63 = prices.pct_change().rolling(63, min_periods=20).std() * np.sqrt(252)
+    dd_126 = prices / prices.rolling(126, min_periods=30).max() - 1.0
+    pos_days_63 = (prices.pct_change() > 0).rolling(63, min_periods=20).mean()
 
     trend_raw = 0.45 * ((prices / sma50) - 1.0) + 0.55 * ((prices / sma200) - 1.0)
     momentum_raw = 0.20 * ret_21 + 0.35 * ret_63 + 0.30 * ret_126 + 0.15 * ret_252
@@ -2139,12 +2153,14 @@ def compute_ai_overlay_scores(prices: pd.DataFrame, component_scores: dict, lang
             explanations[dt][ticker] = "; ".join(reasons)
     return overlay, explanations
 
+
 def compute_total_score_by_regime(prices: pd.DataFrame, regime_df: pd.DataFrame, component_scores: dict, ai_overlay: pd.DataFrame) -> pd.DataFrame:
     total = pd.DataFrame(index=prices.index, columns=prices.columns, dtype=float)
     for dt in prices.index:
-        profile = get_regime_profile(regime_df.loc[dt, "regime_code"])
+        regime_code = regime_df.loc[dt, "regime_code"]
+        profile = get_regime_profile(regime_code)
         w = profile["score_weights"]
-        total.loc[dt] = (
+        base_score = (
             component_scores["trend"].loc[dt] * w["trend"] +
             component_scores["momentum"].loc[dt] * w["momentum"] +
             component_scores["quality"].loc[dt] * w["quality"] +
@@ -2152,6 +2168,13 @@ def compute_total_score_by_regime(prices: pd.DataFrame, regime_df: pd.DataFrame,
             component_scores["regime_fit"].loc[dt] * w["regime_fit"] +
             ai_overlay.loc[dt]
         )
+        if regime_code in {"BULL", "RECOVERY"}:
+            for ticker in prices.columns:
+                if is_crypto_or_high_beta_ticker(ticker):
+                    momentum_boost = float(component_scores["momentum"].loc[dt, ticker] >= 65) * 6.0
+                    trend_boost = float(component_scores["trend"].loc[dt, ticker] >= 60) * 4.0
+                    base_score.loc[ticker] += momentum_boost + trend_boost
+        total.loc[dt] = base_score
     return total.clip(lower=0, upper=100)
 
 def should_threshold_rebalance(date, regime_code: str, held_assets: list[str], selected_assets: list[str], current_weight_map: dict, target_weight_map: dict, score_today: pd.Series, component_scores: dict, last_regime_code: str | None) -> tuple[bool, str]:
@@ -2174,52 +2197,64 @@ def should_threshold_rebalance(date, regime_code: str, held_assets: list[str], s
             pass
     return False, "Kein Schwellen-Trigger"
 
+
 def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score: pd.DataFrame, regime_df: pd.DataFrame, component_scores: dict, effective_top_n: int, max_weight: float, soft_cash_mode: bool, cash_floor: float, cash_ceiling: float, soft_invest_ratio: float, min_score_user: float, conviction_power: float) -> dict:
     regime_code = regime_df.loc[date, "regime_code"]
     profile = get_regime_profile(regime_code)
-    score_today = total_score.loc[date].dropna().sort_values(ascending=False)
-    trend_today = component_scores["trend"].loc[date]
-    risk_today = component_scores["risk"].loc[date]
-    quality_today = component_scores["quality"].loc[date]
-    momentum_today = component_scores["momentum"].loc[date]
+    available = current_prices.dropna().index.tolist()
+    score_today = total_score.loc[date].reindex(available).dropna().sort_values(ascending=False)
+    trend_today = component_scores["trend"].loc[date].reindex(available).fillna(50)
+    risk_today = component_scores["risk"].loc[date].reindex(available).fillna(50)
+    quality_today = component_scores["quality"].loc[date].reindex(available).fillna(50)
+    momentum_today = component_scores["momentum"].loc[date].reindex(available).fillna(50)
+    regime_fit_today = component_scores["regime_fit"].loc[date].reindex(available).fillna(50)
+
+    dynamic_floor = max(min_score_user * 100, profile["min_score"] - 8.0)
 
     if regime_code == "BULL":
-        eligible = score_today[(trend_today.reindex(score_today.index) >= 55) & (momentum_today.reindex(score_today.index) >= 55)]
+        eligible = score_today[(trend_today.reindex(score_today.index) >= 42) & (momentum_today.reindex(score_today.index) >= 45)]
+        eligible = eligible + regime_fit_today.reindex(eligible.index).fillna(50) * 0.03
     elif regime_code == "TRANSITION":
-        eligible = score_today[(quality_today.reindex(score_today.index) >= 45) & (risk_today.reindex(score_today.index) >= 45)]
+        eligible = score_today[(quality_today.reindex(score_today.index) >= 38) & (risk_today.reindex(score_today.index) >= 35)]
     elif regime_code == "BEAR":
-        eligible = score_today[(risk_today.reindex(score_today.index) >= 60) & (quality_today.reindex(score_today.index) >= 50)]
+        eligible = score_today[(risk_today.reindex(score_today.index) >= 32) & (quality_today.reindex(score_today.index) >= 35)]
     else:
-        eligible = score_today[(trend_today.reindex(score_today.index) >= 45) & (momentum_today.reindex(score_today.index) >= 45)]
+        eligible = score_today[(trend_today.reindex(score_today.index) >= 38) & (momentum_today.reindex(score_today.index) >= 40)]
 
-    eligible = eligible[eligible >= max(min_score_user * 100, profile["min_score"])]
-    selected = eligible.head(effective_top_n)
+    eligible = eligible[eligible >= dynamic_floor]
 
-    if len(selected) == 0 and soft_cash_mode:
+    if regime_code in {"BULL", "RECOVERY"}:
+        for ticker in list(score_today.index):
+            if is_crypto_or_high_beta_ticker(ticker):
+                eligible.loc[ticker] = max(float(eligible.get(ticker, np.nan)) if ticker in eligible.index else np.nan, float(score_today.loc[ticker]))
+
+    selected = eligible.sort_values(ascending=False).head(effective_top_n)
+
+    if len(selected) == 0:
         fallback = score_today.head(effective_top_n)
+        if len(fallback) == 0:
+            return {
+                "selected": pd.Series(dtype=float),
+                "weights": pd.Series(dtype=float),
+                "invest_ratio": 0.0,
+                "regime_code": regime_code,
+                "strategy_name": profile["strategy"] + " / Cash",
+                "cash_target": min(max(cash_floor, profile["cash_target"]), cash_ceiling),
+            }
         shifted = fallback - fallback.min() + 1e-6
-        weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.2, conviction_power - 0.4))
+        weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.1, conviction_power - 0.2))
+        invest_ratio = profile["invest_ratio"] if regime_code in {"BULL", "RECOVERY"} else min(profile["invest_ratio"], soft_invest_ratio if soft_cash_mode else profile["invest_ratio"])
         return {
             "selected": fallback,
             "weights": weights,
-            "invest_ratio": min(profile["invest_ratio"], soft_invest_ratio),
+            "invest_ratio": invest_ratio,
             "regime_code": regime_code,
-            "strategy_name": profile["strategy"] + " / Soft Cash",
-            "cash_target": max(cash_floor, profile["cash_target"]),
-        }
-
-    if len(selected) == 0:
-        return {
-            "selected": pd.Series(dtype=float),
-            "weights": pd.Series(dtype=float),
-            "invest_ratio": 0.0,
-            "regime_code": regime_code,
-            "strategy_name": profile["strategy"] + " / Cash",
-            "cash_target": max(cash_floor, profile["cash_target"]),
+            "strategy_name": profile["strategy"] + " / Flexible Fallback",
+            "cash_target": min(max(cash_floor, profile["cash_target"]), cash_ceiling),
         }
 
     shifted = selected - selected.min() + 1e-6
-    weights = conviction_weights(shifted, max_weight=max_weight, power=conviction_power)
+    weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.2, conviction_power))
     return {
         "selected": selected,
         "weights": weights,
@@ -2246,13 +2281,15 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     ai_overlay_scores, ai_explanations = compute_ai_overlay_scores(prices, component_scores, lang)
     total_score = compute_total_score_by_regime(prices, regime_df, component_scores, ai_overlay_scores)
 
-    valid_mask = (
-        component_scores["trend"].notna().all(axis=1) &
-        component_scores["momentum"].notna().all(axis=1) &
-        component_scores["quality"].notna().all(axis=1) &
-        component_scores["risk"].notna().all(axis=1) &
-        total_score.notna().all(axis=1)
-    )
+    score_stack = pd.concat([
+        component_scores["trend"],
+        component_scores["momentum"],
+        component_scores["quality"],
+        component_scores["risk"],
+        total_score,
+    ], axis=1, keys=["trend", "momentum", "quality", "risk", "total"])
+    row_valid_assets = total_score.notna().sum(axis=1)
+    valid_mask = row_valid_assets >= 2
     prices = prices.loc[valid_mask].copy()
     regime_df = regime_df.loc[valid_mask].copy()
     total_score = total_score.loc[valid_mask].copy()
@@ -2517,6 +2554,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         .rename(columns={"count": "Tage"})
     )
 
+    latest_top_asset_explanations = []
     return {
         "bot_metrics": bot_metrics,
         "bh_metrics": bh_metrics,
@@ -2557,7 +2595,155 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         "regime_summary_df": regime_summary_df,
         "latest_score_breakdown_df": latest_score_breakdown_df,
         "ki_explanations_df": ki_explanations_df,
+        "latest_top_asset_explanations": latest_top_asset_explanations,
+        "enable_ki_explanations": bool(st.session_state.get("enable_ki_explanations", False)),
     }
+
+
+def is_crypto_or_high_beta_ticker(ticker: str) -> bool:
+    t = str(ticker).upper()
+    crypto_tokens = ["BTC", "ETH", "SOL", "MSTR", "COIN", "IBIT", "BITX", "ARKK", "HOOD"]
+    return any(token in t for token in crypto_tokens)
+
+def build_local_ki_explanation(ticker: str, context: dict, lang: str) -> str:
+    trend = float(context.get("trend_score", 50))
+    momentum = float(context.get("momentum_score", 50))
+    quality = float(context.get("quality_score", 50))
+    risk = float(context.get("risk_score", 50))
+    regime = context.get("regime", "Transition")
+    strategy = context.get("strategy", "Dynamic Rotation")
+    if lang == "DE":
+        parts = []
+        if momentum >= 70 or trend >= 70:
+            parts.append(f"{ticker} wird bevorzugt, weil Trend ({trend:.0f}) und Momentum ({momentum:.0f}) aktuell stark sind.")
+        elif quality >= 65:
+            parts.append(f"{ticker} bleibt im Fokus, weil die Qualitäts- und Stabilitätswerte ({quality:.0f}) solide aussehen.")
+        else:
+            parts.append(f"{ticker} bleibt als chancenreicher Titel im Setup, obwohl die Signale gemischt sind.")
+        if is_crypto_or_high_beta_ticker(ticker):
+            parts.append(f"Im Regime '{regime}' erlaubt {strategy} bewusst mehr Raum für hochvolatile Gewinner.")
+        else:
+            parts.append(f"Im Regime '{regime}' passt der Titel gut zur aktiven Strategie '{strategy}'.")
+        return " ".join(parts[:2])
+    parts = []
+    if momentum >= 70 or trend >= 70:
+        parts.append(f"{ticker} is preferred because trend ({trend:.0f}) and momentum ({momentum:.0f}) are currently strong.")
+    elif quality >= 65:
+        parts.append(f"{ticker} stays in focus because quality and stability metrics ({quality:.0f}) look solid.")
+    else:
+        parts.append(f"{ticker} remains in the mix as an opportunity asset even with mixed signals.")
+    if is_crypto_or_high_beta_ticker(ticker):
+        parts.append(f"In the '{regime}' regime, {strategy} intentionally allows more room for high-volatility winners.")
+    else:
+        parts.append(f"In the '{regime}' regime, the asset fits the active '{strategy}' module well.")
+    return " ".join(parts[:2])
+
+@st.cache_data(show_spinner=False, ttl=43200)
+def _cached_grok_explanation(prompt_payload: str, api_key: str) -> str:
+    url = "https://api.x.ai/v1/chat/completions"
+    payload = {
+        "model": "grok-4.20-reasoning",
+        "messages": [
+            {
+                "role": "system",
+                "content": "Du bist ein präziser quantitativer Portfolio-Assistent. Antworte auf Deutsch, maximal 2 Sätze, konkret und ohne Marketing."
+            },
+            {
+                "role": "user",
+                "content": prompt_payload
+            }
+        ],
+        "max_tokens": 140
+    }
+    req = urllib_request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    with urllib_request.urlopen(req, timeout=25) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
+    )
+
+def get_ki_explanation(ticker: str, context: dict) -> str:
+    lang = context.get("lang", "DE")
+    local_fallback = build_local_ki_explanation(ticker, context, lang)
+    api_key = st.secrets.get("GROK_API_KEY", "")
+    if not st.session_state.get("enable_ki_explanations", False):
+        return local_fallback
+    if not api_key:
+        return local_fallback
+
+    prompt_payload = (
+        f"Ticker: {ticker}\n"
+        f"Regime: {context.get('regime', '')}\n"
+        f"Strategie: {context.get('strategy', '')}\n"
+        f"Trend-Score: {context.get('trend_score', 0):.1f}\n"
+        f"Momentum-Score: {context.get('momentum_score', 0):.1f}\n"
+        f"Quality-Score: {context.get('quality_score', 0):.1f}\n"
+        f"Risk-Score: {context.get('risk_score', 0):.1f}\n"
+        f"Regime-Fit-Score: {context.get('regime_fit_score', 0):.1f}\n"
+        f"KI-Overlay: {context.get('ai_overlay', 0):.1f}\n"
+        f"Gesamtscore: {context.get('total_score', 0):.1f}\n"
+        f"High-Beta/Krypto: {'ja' if is_crypto_or_high_beta_ticker(ticker) else 'nein'}\n"
+        "Erkläre kurz, warum der Titel im aktuellen Allocato-Setup gewichtet wurde."
+    )
+    try:
+        response = _cached_grok_explanation(prompt_payload, api_key)
+        return response or local_fallback
+    except Exception:
+        return local_fallback
+
+def build_latest_top_asset_explanations(context: dict, lang: str) -> list[dict]:
+    selected_assets_log = context.get("selected_assets_log", {})
+    if not selected_assets_log:
+        return []
+    last_dt = max(selected_assets_log.keys())
+    selected = selected_assets_log.get(last_dt, []) or []
+    if not selected:
+        return []
+
+    score_df = context.get("latest_score_breakdown_df")
+    regime_df = context.get("regime_df")
+    rebal_df = context.get("rebalance_df", pd.DataFrame())
+    strategy = ""
+    if not rebal_df.empty:
+        latest_row = rebal_df.iloc[-1]
+        strategy = str(latest_row.get(T["rebal_reason_col"], ""))
+
+    explanations = []
+    for ticker in selected:
+        row = None
+        if isinstance(score_df, pd.DataFrame) and not score_df.empty and "Ticker" in score_df.columns:
+            matched = score_df[score_df["Ticker"] == ticker]
+            if not matched.empty:
+                row = matched.iloc[0]
+        context_payload = {
+            "lang": lang,
+            "regime": str(regime_df.loc[last_dt, "regime"]) if regime_df is not None and last_dt in regime_df.index else "",
+            "strategy": strategy,
+            "trend_score": float(row["Trend Score"]) if row is not None else 50.0,
+            "momentum_score": float(row["Momentum Score"]) if row is not None else 50.0,
+            "quality_score": float(row["Quality Score"]) if row is not None else 50.0,
+            "risk_score": float(row["Risk Score"]) if row is not None else 50.0,
+            "regime_fit_score": float(row["Regime-Fit Score"]) if row is not None else 50.0,
+            "ai_overlay": float(row["KI Overlay"]) if row is not None else 0.0,
+            "total_score": float(row["Gesamtscore"]) if row is not None else 50.0,
+        }
+        explanations.append({
+            "ticker": ticker,
+            "text": get_ki_explanation(ticker, context_payload),
+        })
+    return explanations
+
 
 def render_calculation_results(context, T, lang, tier):
     bot_metrics = context["bot_metrics"]
@@ -3669,6 +3855,14 @@ simulate_taxes_de = st.sidebar.checkbox(
     help=T["simulate_taxes_de_help"],
 )
 
+enable_ki_explanations = st.sidebar.checkbox(
+    T["enable_ki_explanations"],
+    key="enable_ki_explanations",
+    help=T["enable_ki_explanations_help"],
+)
+if enable_ki_explanations and not st.secrets.get("GROK_API_KEY", ""):
+    st.sidebar.caption(T["ki_explanations_missing_key"])
+
 # =========================
 # Explainers
 # =========================
@@ -3752,12 +3946,15 @@ if calculate_clicked:
             st.stop()
 
         context["skipped_tickers"] = skipped_tickers + [t for t in dropped_after_align if t not in skipped_tickers]
+        context["latest_top_asset_explanations"] = build_latest_top_asset_explanations(context, lang)
         st.session_state["last_calc_results"] = context
         render_calculation_results(context, T, lang, tier)
         save_logged_in_user_state()
 
 elif st.session_state.get("last_calc_results") is not None:
-    render_calculation_results(st.session_state["last_calc_results"], T, lang, tier)
+    cached_context = st.session_state["last_calc_results"]
+    cached_context["latest_top_asset_explanations"] = build_latest_top_asset_explanations(cached_context, lang)
+    render_calculation_results(cached_context, T, lang, tier)
 else:
     st.info(T["info_start"])
     if get_current_tier() == "Free":
