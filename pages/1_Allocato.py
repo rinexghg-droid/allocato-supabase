@@ -1935,6 +1935,630 @@ def render_net_tax_badge(label: str, value: float, paid_in: float):
     )
 
 
+
+
+def _safe_pct_rank(series: pd.Series) -> pd.Series:
+    s = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    if s.dropna().empty:
+        return pd.Series(50.0, index=s.index)
+    ranks = s.rank(pct=True)
+    return (ranks * 100).fillna(50.0)
+
+def clamp_series(series: pd.Series, low: float = 0.0, high: float = 100.0) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").fillna(0.0).clip(lower=low, upper=high)
+
+def load_regime_reference_series(period: str, dates: pd.Index) -> pd.Series:
+    spy_close = load_single_close("SPY", period)
+    if spy_close.empty:
+        return pd.Series(index=dates, data=np.nan)
+    return spy_close.reindex(dates).ffill()
+
+def compute_market_regime(prices: pd.DataFrame, period: str, lang: str) -> tuple[pd.DataFrame, pd.Series]:
+    dates = prices.index
+    spy_close = load_regime_reference_series(period, dates)
+    spy_sma200 = spy_close.rolling(200).mean()
+    spy_mom_63 = spy_close / spy_close.shift(63) - 1.0
+    market_vol_63 = prices.pct_change().mean(axis=1).rolling(63).std() * np.sqrt(252)
+    breadth = (prices / prices.shift(63) - 1.0 > 0).mean(axis=1)
+
+    regime_names_de = {
+        "BULL": "Bull Regime",
+        "TRANSITION": "Transition / Unsicher",
+        "BEAR": "Bear Regime",
+        "RECOVERY": "Recovery Regime",
+    }
+    regime_names_en = {
+        "BULL": "Bull Regime",
+        "TRANSITION": "Transition / Uncertain",
+        "BEAR": "Bear Regime",
+        "RECOVERY": "Recovery Regime",
+    }
+    regime_names = regime_names_en if lang == "EN" else regime_names_de
+
+    regime_codes = []
+    for dt in dates:
+        price = spy_close.loc[dt]
+        sma = spy_sma200.loc[dt]
+        mom = spy_mom_63.loc[dt]
+        vol = market_vol_63.loc[dt]
+        br = breadth.loc[dt]
+
+        if pd.isna(price) or pd.isna(sma) or pd.isna(mom) or pd.isna(vol) or pd.isna(br):
+            regime_codes.append("TRANSITION")
+            continue
+
+        above_sma = price > sma
+        strong_mom = mom > 0.04
+        weak_mom = mom < -0.04
+        high_vol = vol > 0.28
+        low_vol = vol < 0.18
+        strong_breadth = br > 0.62
+        weak_breadth = br < 0.42
+
+        if above_sma and strong_mom and strong_breadth and not high_vol:
+            regime_codes.append("BULL")
+        elif (not above_sma) and weak_mom and weak_breadth:
+            regime_codes.append("BEAR")
+        elif above_sma and mom > 0 and br > 0.48:
+            regime_codes.append("RECOVERY" if (high_vol or not low_vol) else "BULL")
+        elif (not above_sma) and mom > -0.02 and br >= 0.45:
+            regime_codes.append("RECOVERY")
+        else:
+            regime_codes.append("TRANSITION")
+
+    regime_code_series = pd.Series(regime_codes, index=dates, name="regime_code")
+    regime_label_series = regime_code_series.map(regime_names).rename("regime")
+    regime_df = pd.DataFrame({
+        "spy_close": spy_close,
+        "spy_sma200": spy_sma200,
+        "spy_mom_63": spy_mom_63,
+        "market_vol_63": market_vol_63,
+        "breadth": breadth,
+        "regime_code": regime_code_series,
+        "regime": regime_label_series,
+    }, index=dates)
+    return regime_df, regime_label_series
+
+def get_regime_profile(regime_code: str) -> dict:
+    profiles = {
+        "BULL": {
+            "score_weights": {"trend": 0.24, "momentum": 0.34, "quality": 0.10, "risk": 0.12, "regime_fit": 0.20},
+            "cash_target": 0.03,
+            "min_score": 45.0,
+            "invest_ratio": 0.98,
+            "strategy": "Trend + Breakout Momentum",
+        },
+        "TRANSITION": {
+            "score_weights": {"trend": 0.24, "momentum": 0.20, "quality": 0.22, "risk": 0.18, "regime_fit": 0.16},
+            "cash_target": 0.10,
+            "min_score": 52.0,
+            "invest_ratio": 0.82,
+            "strategy": "Quality + Momentum",
+        },
+        "BEAR": {
+            "score_weights": {"trend": 0.18, "momentum": 0.12, "quality": 0.24, "risk": 0.28, "regime_fit": 0.18},
+            "cash_target": 0.38,
+            "min_score": 58.0,
+            "invest_ratio": 0.52,
+            "strategy": "Defensive Rotation",
+        },
+        "RECOVERY": {
+            "score_weights": {"trend": 0.26, "momentum": 0.26, "quality": 0.14, "risk": 0.12, "regime_fit": 0.22},
+            "cash_target": 0.08,
+            "min_score": 50.0,
+            "invest_ratio": 0.90,
+            "strategy": "Recovery Re-Entry",
+        },
+    }
+    return profiles.get(regime_code, profiles["TRANSITION"])
+
+def compute_component_score_table(prices: pd.DataFrame, regime_df: pd.DataFrame, vol_penalty: float) -> dict:
+    ret_21 = prices / prices.shift(21) - 1.0
+    ret_63 = prices / prices.shift(63) - 1.0
+    ret_126 = prices / prices.shift(126) - 1.0
+    ret_252 = prices / prices.shift(252) - 1.0
+    sma50 = prices.rolling(50).mean()
+    sma200 = prices.rolling(200).mean()
+    vol_63 = prices.pct_change().rolling(63).std() * np.sqrt(252)
+    dd_126 = prices / prices.rolling(126).max() - 1.0
+    pos_days_63 = (prices.pct_change() > 0).rolling(63).mean()
+
+    trend_raw = 0.45 * ((prices / sma50) - 1.0) + 0.55 * ((prices / sma200) - 1.0)
+    momentum_raw = 0.20 * ret_21 + 0.35 * ret_63 + 0.30 * ret_126 + 0.15 * ret_252
+    quality_raw = 0.35 * pos_days_63 + 0.35 * (ret_252 - vol_penalty * vol_63) + 0.30 * (1.0 + dd_126)
+    risk_raw = -0.55 * vol_63 + 0.45 * dd_126
+
+    trend_score = trend_raw.rank(axis=1, pct=True) * 100
+    momentum_score = momentum_raw.rank(axis=1, pct=True) * 100
+    quality_score = quality_raw.rank(axis=1, pct=True) * 100
+    risk_score = risk_raw.rank(axis=1, pct=True) * 100
+
+    regime_fit_score = pd.DataFrame(index=prices.index, columns=prices.columns, dtype=float)
+    for dt in prices.index:
+        regime_code = regime_df.loc[dt, "regime_code"]
+        if regime_code == "BULL":
+            fit_raw = 0.60 * momentum_raw.loc[dt] + 0.40 * trend_raw.loc[dt]
+        elif regime_code == "BEAR":
+            fit_raw = 0.60 * risk_raw.loc[dt] + 0.40 * quality_raw.loc[dt]
+        elif regime_code == "RECOVERY":
+            fit_raw = 0.50 * trend_raw.loc[dt] + 0.30 * momentum_raw.loc[dt] + 0.20 * quality_raw.loc[dt]
+        else:
+            fit_raw = 0.40 * quality_raw.loc[dt] + 0.30 * momentum_raw.loc[dt] + 0.30 * risk_raw.loc[dt]
+        regime_fit_score.loc[dt] = _safe_pct_rank(fit_raw)
+
+    return {
+        "trend": clamp_series(trend_score.stack()).unstack(),
+        "momentum": clamp_series(momentum_score.stack()).unstack(),
+        "quality": clamp_series(quality_score.stack()).unstack(),
+        "risk": clamp_series(risk_score.stack()).unstack(),
+        "regime_fit": clamp_series(regime_fit_score.stack()).unstack(),
+        "sma50": sma50,
+        "sma200": sma200,
+        "vol_63": vol_63,
+        "ret_21": ret_21,
+        "ret_63": ret_63,
+        "ret_126": ret_126,
+        "ret_252": ret_252,
+    }
+
+def compute_ai_overlay_scores(prices: pd.DataFrame, component_scores: dict, lang: str) -> tuple[pd.DataFrame, dict]:
+    overlay = pd.DataFrame(0.0, index=prices.index, columns=prices.columns, dtype=float)
+    explanations = {}
+    trend = component_scores["trend"]
+    momentum = component_scores["momentum"]
+    quality = component_scores["quality"]
+    risk = component_scores["risk"]
+
+    for dt in prices.index:
+        explanations[dt] = {}
+        for ticker in prices.columns:
+            boost = 0.0
+            reasons = []
+            tr = float(trend.loc[dt, ticker])
+            mo = float(momentum.loc[dt, ticker])
+            qu = float(quality.loc[dt, ticker])
+            ri = float(risk.loc[dt, ticker])
+
+            if tr > 75 and mo > 75:
+                boost += 10
+                reasons.append("Trend + Momentum stark" if lang == "DE" else "Strong trend + momentum")
+            if qu > 70:
+                boost += 4
+                reasons.append("stabile Qualitätsmerkmale" if lang == "DE" else "stable quality profile")
+            if ri < 30:
+                boost -= 8
+                reasons.append("erhöhtes Risiko / Drawdown" if lang == "DE" else "elevated risk / drawdown")
+            if mo < 25:
+                boost -= 7
+                reasons.append("schwaches relatives Momentum" if lang == "DE" else "weak relative momentum")
+
+            boost = float(np.clip(boost, -15, 15))
+            overlay.loc[dt, ticker] = boost
+            if not reasons:
+                reasons.append("neutraler KI-Overlay" if lang == "DE" else "neutral AI overlay")
+            explanations[dt][ticker] = "; ".join(reasons)
+    return overlay, explanations
+
+def compute_total_score_by_regime(prices: pd.DataFrame, regime_df: pd.DataFrame, component_scores: dict, ai_overlay: pd.DataFrame) -> pd.DataFrame:
+    total = pd.DataFrame(index=prices.index, columns=prices.columns, dtype=float)
+    for dt in prices.index:
+        profile = get_regime_profile(regime_df.loc[dt, "regime_code"])
+        w = profile["score_weights"]
+        total.loc[dt] = (
+            component_scores["trend"].loc[dt] * w["trend"] +
+            component_scores["momentum"].loc[dt] * w["momentum"] +
+            component_scores["quality"].loc[dt] * w["quality"] +
+            component_scores["risk"].loc[dt] * w["risk"] +
+            component_scores["regime_fit"].loc[dt] * w["regime_fit"] +
+            ai_overlay.loc[dt]
+        )
+    return total.clip(lower=0, upper=100)
+
+def should_threshold_rebalance(date, regime_code: str, held_assets: list[str], selected_assets: list[str], current_weight_map: dict, target_weight_map: dict, score_today: pd.Series, component_scores: dict, last_regime_code: str | None) -> tuple[bool, str]:
+    if last_regime_code is not None and regime_code != last_regime_code:
+        return True, "Regimewechsel"
+    for ticker in selected_assets:
+        drift = abs(target_weight_map.get(ticker, 0.0) - current_weight_map.get(ticker, 0.0))
+        if drift > 0.08:
+            return True, "Gewichtsdrift > 8%"
+    if held_assets:
+        held_score = score_today.reindex(held_assets).dropna().mean() if any(t in score_today.index for t in held_assets) else 0.0
+        selected_score = score_today.reindex(selected_assets).dropna().mean() if any(t in score_today.index for t in selected_assets) else 0.0
+        if selected_score - held_score > 10:
+            return True, "neues Top-Asset deutlich besser"
+    for ticker in held_assets:
+        try:
+            if component_scores["trend"].loc[date, ticker] < 35:
+                return True, f"Trendbruch {ticker}"
+        except Exception:
+            pass
+    return False, "Kein Schwellen-Trigger"
+
+def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score: pd.DataFrame, regime_df: pd.DataFrame, component_scores: dict, effective_top_n: int, max_weight: float, soft_cash_mode: bool, cash_floor: float, cash_ceiling: float, soft_invest_ratio: float, min_score_user: float, conviction_power: float) -> dict:
+    regime_code = regime_df.loc[date, "regime_code"]
+    profile = get_regime_profile(regime_code)
+    score_today = total_score.loc[date].dropna().sort_values(ascending=False)
+    trend_today = component_scores["trend"].loc[date]
+    risk_today = component_scores["risk"].loc[date]
+    quality_today = component_scores["quality"].loc[date]
+    momentum_today = component_scores["momentum"].loc[date]
+
+    if regime_code == "BULL":
+        eligible = score_today[(trend_today.reindex(score_today.index) >= 55) & (momentum_today.reindex(score_today.index) >= 55)]
+    elif regime_code == "TRANSITION":
+        eligible = score_today[(quality_today.reindex(score_today.index) >= 45) & (risk_today.reindex(score_today.index) >= 45)]
+    elif regime_code == "BEAR":
+        eligible = score_today[(risk_today.reindex(score_today.index) >= 60) & (quality_today.reindex(score_today.index) >= 50)]
+    else:
+        eligible = score_today[(trend_today.reindex(score_today.index) >= 45) & (momentum_today.reindex(score_today.index) >= 45)]
+
+    eligible = eligible[eligible >= max(min_score_user * 100, profile["min_score"])]
+    selected = eligible.head(effective_top_n)
+
+    if len(selected) == 0 and soft_cash_mode:
+        fallback = score_today.head(effective_top_n)
+        shifted = fallback - fallback.min() + 1e-6
+        weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.2, conviction_power - 0.4))
+        return {
+            "selected": fallback,
+            "weights": weights,
+            "invest_ratio": min(profile["invest_ratio"], soft_invest_ratio),
+            "regime_code": regime_code,
+            "strategy_name": profile["strategy"] + " / Soft Cash",
+            "cash_target": max(cash_floor, profile["cash_target"]),
+        }
+
+    if len(selected) == 0:
+        return {
+            "selected": pd.Series(dtype=float),
+            "weights": pd.Series(dtype=float),
+            "invest_ratio": 0.0,
+            "regime_code": regime_code,
+            "strategy_name": profile["strategy"] + " / Cash",
+            "cash_target": max(cash_floor, profile["cash_target"]),
+        }
+
+    shifted = selected - selected.min() + 1e-6
+    weights = conviction_weights(shifted, max_weight=max_weight, power=conviction_power)
+    return {
+        "selected": selected,
+        "weights": weights,
+        "invest_ratio": profile["invest_ratio"],
+        "regime_code": regime_code,
+        "strategy_name": profile["strategy"],
+        "cash_target": min(max(cash_floor, profile["cash_target"]), cash_ceiling),
+    }
+
+def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, top_n: int, simulate_taxes_de: bool):
+    tickers = list(prices.columns)
+    effective_top_n = min(top_n, len(tickers))
+    max_weight = max_weight_pct / 100.0
+    daily_cash_rate = (cash_interest_pct / 100.0) / 252.0
+    cash_floor = target_cash_floor_pct / 100.0
+    cash_ceiling = target_cash_ceiling_pct / 100.0
+    soft_invest_ratio = soft_cash_invest_ratio_pct / 100.0
+    tax_rate = 0.26375
+    bot_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
+    bh_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
+
+    regime_df, _ = compute_market_regime(prices, period, lang)
+    component_scores = compute_component_score_table(prices, regime_df, vol_penalty)
+    ai_overlay_scores, ai_explanations = compute_ai_overlay_scores(prices, component_scores, lang)
+    total_score = compute_total_score_by_regime(prices, regime_df, component_scores, ai_overlay_scores)
+
+    valid_mask = (
+        component_scores["trend"].notna().all(axis=1) &
+        component_scores["momentum"].notna().all(axis=1) &
+        component_scores["quality"].notna().all(axis=1) &
+        component_scores["risk"].notna().all(axis=1) &
+        total_score.notna().all(axis=1)
+    )
+    prices = prices.loc[valid_mask].copy()
+    regime_df = regime_df.loc[valid_mask].copy()
+    total_score = total_score.loc[valid_mask].copy()
+    for key in ["trend", "momentum", "quality", "risk", "regime_fit", "sma50", "sma200", "vol_63", "ret_21", "ret_63", "ret_126", "ret_252"]:
+        component_scores[key] = component_scores[key].loc[valid_mask].copy()
+
+    dates = prices.index
+    if len(dates) < 30:
+        raise ValueError("too_few_rows")
+
+    shares = {t: 0.0 for t in tickers}
+    bot_lots_state = init_tax_lot_state(tickers)
+    cash = float(initial_capital)
+
+    equity_bot = pd.Series(index=dates, dtype=float)
+    cash_bot = pd.Series(index=dates, dtype=float)
+    invested_bot = pd.Series(index=dates, dtype=float)
+    weight_history = pd.DataFrame(index=dates, columns=tickers, dtype=float)
+    cash_weight_history = pd.Series(index=dates, dtype=float)
+    cumulative_contributions = pd.Series(index=dates, dtype=float)
+
+    selected_assets_log = {}
+    target_weights_log = {}
+    rebalance_log = []
+    trade_count = 0
+    last_regime_code = None
+
+    for i, date in enumerate(dates):
+        current_prices = prices.loc[date]
+        prev_date = None if i == 0 else dates[i - 1]
+        current_year = int(date.year)
+        if bot_tax_state["year"] != current_year:
+            bot_tax_state["year"] = current_year
+            bot_tax_state["used_allowance"] = 0.0
+
+        if daily_cash_rate > 0:
+            cash *= (1 + daily_cash_rate)
+
+        monthly_contribution_added = False
+        if i > 0 and (date.month != prev_date.month or date.year != prev_date.year):
+            cash += monthly_savings
+            monthly_contribution_added = True
+
+        current_values = {t: shares[t] * float(current_prices[t]) for t in tickers}
+        total_equity_before = cash + sum(current_values.values())
+        current_weight_map = {t: (current_values[t] / total_equity_before if total_equity_before > 0 else 0.0) for t in tickers}
+
+        strategy_payload = build_target_portfolio_for_date(
+            date=date,
+            current_prices=current_prices,
+            total_score=total_score,
+            regime_df=regime_df,
+            component_scores=component_scores,
+            effective_top_n=effective_top_n,
+            max_weight=max_weight,
+            soft_cash_mode=soft_cash_mode,
+            cash_floor=cash_floor,
+            cash_ceiling=cash_ceiling,
+            soft_invest_ratio=soft_invest_ratio,
+            min_score_user=min_score,
+            conviction_power=conviction_power,
+        )
+        selected = strategy_payload["selected"]
+        weights = strategy_payload["weights"]
+        regime_code = strategy_payload["regime_code"]
+        invest_ratio = strategy_payload["invest_ratio"]
+        strategy_name = strategy_payload["strategy_name"]
+
+        target_values = {t: 0.0 for t in tickers}
+        investable_capital = total_equity_before * min(max(invest_ratio, 0.0), 1.0)
+        for tkr in weights.index:
+            target_values[tkr] = investable_capital * float(weights[tkr])
+
+        target_weight_map = {t: (target_values[t] / total_equity_before if total_equity_before > 0 else 0.0) for t in tickers}
+        held_assets = [t for t, s in shares.items() if s > 1e-12]
+        threshold_trigger, threshold_reason = should_threshold_rebalance(
+            date=date,
+            regime_code=regime_code,
+            held_assets=held_assets,
+            selected_assets=list(selected.index),
+            current_weight_map=current_weight_map,
+            target_weight_map=target_weight_map,
+            score_today=total_score.loc[date],
+            component_scores=component_scores,
+            last_regime_code=last_regime_code,
+        )
+        scheduled_rebalance = i == 0 or (prev_date is not None and is_rebalance_day(date, prev_date, rebalance_freq))
+        do_rebalance = scheduled_rebalance or threshold_trigger
+
+        if do_rebalance:
+            turnover = sum(abs(target_values[t] - current_values[t]) for t in tickers)
+            fees = turnover * fee_pct
+            total_equity_after_fees = max(total_equity_before - fees, 0.0)
+
+            if total_equity_before > 0:
+                fee_adjustment = total_equity_after_fees / total_equity_before
+                for t in tickers:
+                    target_values[t] *= fee_adjustment
+
+            buy_actions = []
+            sell_actions = []
+            taxes_due_total = 0.0
+
+            for tkr in tickers:
+                price = float(current_prices[tkr])
+                new_shares = target_values[tkr] / price if price > 0 else 0.0
+                old_shares = shares[tkr]
+                updated_shares, delta_value, tax_due = apply_trade_with_tax(
+                    ticker=tkr,
+                    current_shares=old_shares,
+                    target_shares=new_shares,
+                    price=price,
+                    lots_state=bot_lots_state,
+                    taxes_enabled=simulate_taxes_de,
+                    tax_state=bot_tax_state,
+                    tax_rate=tax_rate,
+                )
+                delta_shares = updated_shares - old_shares
+                if abs(delta_shares) > 1e-12:
+                    trade_count += 1
+                    if delta_value > 1e-6:
+                        buy_actions.append(f"{tkr} (+{delta_value:,.0f}€)")
+                    elif delta_value < -1e-6:
+                        sell_actions.append(f"{tkr} ({delta_value:,.0f}€)")
+                taxes_due_total += tax_due
+                shares[tkr] = updated_shares
+
+            bot_tax_state["taxes_paid_total"] += taxes_due_total
+            invested_value = sum(shares[t] * float(current_prices[t]) for t in tickers)
+            cash = max(0.0, total_equity_after_fees - invested_value - taxes_due_total)
+
+            target_weights_log[date] = {tkr: (target_values[tkr] / total_equity_before) for tkr in weights.index} if total_equity_before > 0 else {}
+            selected_assets_log[date] = list(selected.index)
+
+            bh_monthly_action = "—"
+            if monthly_contribution_added:
+                per_asset_bh = monthly_savings / max(len(tickers), 1)
+                bh_monthly_action = (
+                    f"{monthly_savings:,.0f}€ gleichmäßig auf {len(tickers)} Titel ({per_asset_bh:,.2f}€ je Titel)"
+                    if lang == "DE"
+                    else f"{monthly_savings:,.0f}€ spread evenly across {len(tickers)} names ({per_asset_bh:,.2f}€ each)"
+                )
+
+            reason_parts = [strategy_name]
+            if scheduled_rebalance:
+                reason_parts.append("Zeit-Trigger" if lang == "DE" else "time trigger")
+            if threshold_trigger:
+                reason_parts.append(threshold_reason)
+            reason_parts.append(regime_df.loc[date, "regime"])
+
+            rebalance_log.append({
+                T["date_col"]: date,
+                T["regime_ok_col"]: regime_df.loc[date, "regime"],
+                T["selected_assets_col"]: ", ".join(list(selected.index)) if len(selected) else "Cash",
+                T["buy_hold_action_col"]: bh_monthly_action,
+                T["rebal_buys_col"]: ", ".join(buy_actions) if buy_actions else "—",
+                T["rebal_sells_col"]: ", ".join(sell_actions) if sell_actions else "—",
+                T["rebal_reason_col"]: " | ".join(reason_parts),
+                T["turnover_col"]: float(turnover),
+                T["fees_col"]: float(fees),
+                T["taxes_col"]: float(taxes_due_total),
+                T["cash_eur_col"]: float(cash),
+                T["portfolio_eur_col"]: float(total_equity_after_fees),
+            })
+
+            last_regime_code = regime_code
+
+        invested_value = sum(shares[t] * float(current_prices[t]) for t in tickers)
+        total_value = max(0.0, invested_value + cash)
+        equity_bot.loc[date] = total_value
+        cash_bot.loc[date] = cash
+        invested_bot.loc[date] = invested_value
+        months_elapsed = (date.year - dates[0].year) * 12 + (date.month - dates[0].month)
+        cumulative_contributions.loc[date] = float(initial_capital + max(0, months_elapsed) * monthly_savings)
+
+        if total_value > 0:
+            for t in tickers:
+                weight_history.loc[date, t] = (shares[t] * float(current_prices[t])) / total_value * 100
+            cash_weight_history.loc[date] = cash / total_value * 100
+        else:
+            weight_history.loc[date] = 0.0
+            cash_weight_history.loc[date] = 0.0
+
+    bh_shares = {t: 0.0 for t in tickers}
+    bh_lots_state = init_tax_lot_state(tickers)
+    bh_cash = 0.0
+    equity_bh = pd.Series(index=dates, dtype=float)
+    first_prices = prices.iloc[0]
+    bh_weight = 1.0 / len(tickers)
+    for t in tickers:
+        init_shares = (initial_capital * bh_weight) / float(first_prices[t])
+        bh_shares[t] = init_shares
+        bh_lots_state[t]["shares"] = init_shares
+        bh_lots_state[t]["cost_total"] = init_shares * float(first_prices[t])
+
+    for i, date in enumerate(dates):
+        current_prices = prices.loc[date]
+        current_year = int(date.year)
+        if bh_tax_state["year"] != current_year:
+            bh_tax_state["year"] = current_year
+            bh_tax_state["used_allowance"] = 0.0
+        if i > 0:
+            prev_date = dates[i - 1]
+            if date.month != prev_date.month or date.year != prev_date.year:
+                for t in tickers:
+                    price_now = float(current_prices[t])
+                    if price_now <= 0:
+                        continue
+                    add_shares = (monthly_savings * bh_weight) / price_now
+                    bh_shares[t] += add_shares
+                    bh_lots_state[t]["shares"] += add_shares
+                    bh_lots_state[t]["cost_total"] += add_shares * price_now
+        bh_value = sum(max(0.0, bh_shares[t]) * float(current_prices[t]) for t in tickers) + max(0.0, bh_cash)
+        equity_bh.loc[date] = max(0.0, bh_value)
+
+    bot_metrics = compute_metrics(equity_bot)
+    bh_metrics = compute_metrics(equity_bh)
+    exposure = (invested_bot / equity_bot.replace(0, np.nan)).mean() * 100
+    avg_cash_quote = (cash_bot / equity_bot.replace(0, np.nan)).mean() * 100
+    outperformance_pp = bot_metrics["total_return"] - bh_metrics["total_return"]
+
+    last_prices = prices.iloc[-1]
+    final_equity = equity_bot.iloc[-1]
+    current_weights = {t: ((shares[t] * float(last_prices[t]) / final_equity) * 100 if final_equity > 0 else 0.0) for t in tickers}
+    weights_df = pd.DataFrame({
+        T["weights_ticker_col"]: list(current_weights.keys()),
+        T["weights_current_col"]: list(current_weights.values()),
+    }).sort_values(T["weights_current_col"], ascending=False)
+
+    rebalance_df = pd.DataFrame(rebalance_log)
+    weights_with_cash = weight_history.copy()
+    weights_with_cash["Cash"] = cash_weight_history
+    weights_with_cash = weights_with_cash.fillna(0.0)
+    weights_chart_df = simplify_weight_chart(weights_with_cash, top_k=weight_chart_top_n, other_label=T["other_label"])
+    rebalance_dates = [entry[T["date_col"]] for entry in rebalance_log]
+    weights_rebalance_only = weights_with_cash.loc[weights_with_cash.index.intersection(rebalance_dates)].copy()
+
+    benchmark_equities = build_benchmark_equity_series(get_benchmark_list(), period, dates, float(initial_capital), float(monthly_savings))
+
+    latest_dt = dates[-1]
+    latest_score_breakdown_df = pd.DataFrame({
+        "Ticker": tickers,
+        "Trend Score": component_scores["trend"].loc[latest_dt].values,
+        "Momentum Score": component_scores["momentum"].loc[latest_dt].values,
+        "Quality Score": component_scores["quality"].loc[latest_dt].values,
+        "Risk Score": component_scores["risk"].loc[latest_dt].values,
+        "Regime-Fit Score": component_scores["regime_fit"].loc[latest_dt].values,
+        "KI Overlay": ai_overlay_scores.loc[latest_dt].values,
+        "Gesamtscore": total_score.loc[latest_dt].values,
+    }).sort_values("Gesamtscore", ascending=False).reset_index(drop=True)
+
+    ki_explanations_df = pd.DataFrame({
+        "Ticker": tickers,
+        "KI Erklärung": [ai_explanations.get(latest_dt, {}).get(t, "") for t in tickers],
+    }).sort_values("Ticker").reset_index(drop=True)
+
+    regime_summary_df = (
+        regime_df[["regime"]]
+        .assign(count=1)
+        .groupby("regime", as_index=False)["count"]
+        .sum()
+        .rename(columns={"count": "Tage"})
+    )
+
+    return {
+        "bot_metrics": bot_metrics,
+        "bh_metrics": bh_metrics,
+        "exposure": exposure,
+        "avg_cash_quote": avg_cash_quote,
+        "outperformance_pp": outperformance_pp,
+        "trade_count": trade_count,
+        "conviction_power": conviction_power,
+        "soft_cash_mode": soft_cash_mode,
+        "target_cash_floor_pct": target_cash_floor_pct,
+        "target_cash_ceiling_pct": target_cash_ceiling_pct,
+        "equity_bot": equity_bot,
+        "equity_bh": equity_bh,
+        "cumulative_contributions": cumulative_contributions,
+        "cash_bot": cash_bot,
+        "invested_bot": invested_bot,
+        "rebalance_df": rebalance_df,
+        "weights_with_cash": weights_with_cash,
+        "weights_chart_df": weights_chart_df,
+        "weights_df": weights_df,
+        "selected_assets_log": selected_assets_log,
+        "target_weights_log": target_weights_log,
+        "weights_rebalance_only": weights_rebalance_only,
+        "show_debug": show_debug,
+        "tickers": tickers,
+        "skipped_tickers": [],
+        "top_n": top_n,
+        "effective_top_n": effective_top_n,
+        "max_weight_pct": max_weight_pct,
+        "use_regime_filter": use_regime_filter,
+        "prices": prices,
+        "raw_score": total_score,
+        "benchmark_equities": benchmark_equities,
+        "simulate_taxes_de": simulate_taxes_de,
+        "bot_taxes_paid": bot_tax_state["taxes_paid_total"],
+        "bh_taxes_paid": bh_tax_state["taxes_paid_total"],
+        "regime_df": regime_df,
+        "regime_summary_df": regime_summary_df,
+        "latest_score_breakdown_df": latest_score_breakdown_df,
+        "ki_explanations_df": ki_explanations_df,
+    }
+
 def render_calculation_results(context, T, lang, tier):
     bot_metrics = context["bot_metrics"]
     bh_metrics = context["bh_metrics"]
@@ -2153,6 +2777,16 @@ def render_calculation_results(context, T, lang, tier):
             st.markdown(f"### {T['tax_note_title']}")
             st.markdown(T["tax_note_text"])
             st.markdown(T["tax_gross_net_text"])
+
+        if context.get("regime_summary_df") is not None:
+            st.markdown("### Regime Engine")
+            st.dataframe(context["regime_summary_df"], use_container_width=True)
+        if context.get("latest_score_breakdown_df") is not None:
+            st.markdown("### Score-Breakdown")
+            st.dataframe(context["latest_score_breakdown_df"].round(2), use_container_width=True)
+        if context.get("ki_explanations_df") is not None:
+            st.markdown("### KI-Overlay Erklärungen" if lang == "DE" else "### AI Overlay Explanations")
+            st.dataframe(context["ki_explanations_df"], use_container_width=True)
     
     with st.expander(T["annual_returns_title"], expanded=True):
         if not annual_returns_df.empty:
@@ -3091,369 +3725,33 @@ if calculate_clicked:
             st.error(T["error_less_than_2"])
             st.stop()
 
-        effective_top_n = min(top_n, len(tickers))
-        max_weight = max_weight_pct / 100.0
-        daily_cash_rate = (cash_interest_pct / 100.0) / 252.0
-        cash_floor = target_cash_floor_pct / 100.0
-        cash_ceiling = target_cash_ceiling_pct / 100.0
-        soft_invest_ratio = soft_cash_invest_ratio_pct / 100.0
-        tax_rate = 0.26375
-        simulate_taxes_de = bool(st.session_state.get("simulate_taxes_de", False))
-        bot_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
-        bh_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
-
-        sma200 = prices.rolling(200).mean()
-        mom_63 = prices / prices.shift(63) - 1
-        mom_126 = prices / prices.shift(126) - 1
-        vol_63 = prices.pct_change().rolling(63).std() * np.sqrt(252)
-        raw_score = 0.6 * mom_126 + 0.4 * mom_63 - vol_penalty * vol_63
-
-        valid_mask = sma200.notna().all(axis=1) & raw_score.notna().all(axis=1)
-        prices = prices.loc[valid_mask].copy()
-        sma200 = sma200.loc[valid_mask].copy()
-        raw_score = raw_score.loc[valid_mask].copy()
-
-        if len(prices) < 30:
+        try:
+            context = simulate_allocato_v2(
+                prices=prices,
+                period=period,
+                lang=lang,
+                initial_capital=float(initial_capital),
+                monthly_savings=float(monthly_savings),
+                rebalance_freq=rebalance_freq,
+                fee_pct=float(fee_pct),
+                min_score=float(min_score),
+                max_weight_pct=int(max_weight_pct),
+                vol_penalty=float(vol_penalty),
+                cash_interest_pct=float(cash_interest_pct),
+                show_debug=bool(show_debug),
+                conviction_power=float(conviction_power),
+                soft_cash_mode=bool(soft_cash_mode),
+                target_cash_floor_pct=int(target_cash_floor_pct),
+                target_cash_ceiling_pct=int(target_cash_ceiling_pct),
+                soft_cash_invest_ratio_pct=int(soft_cash_invest_ratio_pct),
+                top_n=int(top_n),
+                simulate_taxes_de=bool(simulate_taxes_de),
+            )
+        except ValueError:
             st.error(T["error_too_few_rows"])
             st.stop()
 
-        regime_ok_series = pd.Series(True, index=prices.index)
-        if use_regime_filter:
-            spy_close = load_single_close("SPY", period)
-            if spy_close.empty:
-                st.warning(T["warning_spy"])
-            else:
-                spy_close = spy_close.reindex(prices.index).ffill()
-                spy_sma200 = spy_close.rolling(200).mean()
-                regime_ok_series = (spy_close > spy_sma200).fillna(False)
-                regime_ok_series = regime_ok_series.loc[prices.index]
-
-        dates = prices.index
-        shares = {t: 0.0 for t in tickers}
-        bot_lots_state = init_tax_lot_state(tickers)
-        cash = float(initial_capital)
-
-        equity_bot = pd.Series(index=dates, dtype=float)
-        cash_bot = pd.Series(index=dates, dtype=float)
-        invested_bot = pd.Series(index=dates, dtype=float)
-        weight_history = pd.DataFrame(index=dates, columns=tickers, dtype=float)
-        cash_weight_history = pd.Series(index=dates, dtype=float)
-        cumulative_contributions = pd.Series(index=dates, dtype=float)
-
-        selected_assets_log = {}
-        target_weights_log = {}
-        rebalance_log = []
-        trade_count = 0
-
-        for i, date in enumerate(dates):
-            current_prices = prices.loc[date]
-            prev_date = None if i == 0 else dates[i - 1]
-
-            current_year = int(date.year)
-            if bot_tax_state["year"] != current_year:
-                bot_tax_state["year"] = current_year
-                bot_tax_state["used_allowance"] = 0.0
-
-            if daily_cash_rate > 0:
-                cash *= (1 + daily_cash_rate)
-
-            if i > 0 and date.month != prev_date.month:
-                cash += monthly_savings
-
-            do_rebalance = False
-            if i == 0:
-                do_rebalance = True
-            elif is_rebalance_day(date, prev_date, rebalance_freq):
-                do_rebalance = True
-
-            if do_rebalance:
-                regime_today_ok = bool(regime_ok_series.loc[date])
-                trend_ok = current_prices > sma200.loc[date]
-                score_today = raw_score.loc[date]
-
-                total_equity_before = cash + sum(shares[t] * current_prices[t] for t in tickers)
-                current_values = {t: shares[t] * current_prices[t] for t in tickers}
-                target_values = {t: 0.0 for t in tickers}
-
-                if regime_today_ok:
-                    eligible = score_today[(trend_ok) & (score_today > min_score)].sort_values(ascending=False)
-                    selected = eligible.head(effective_top_n)
-
-                    if len(selected) > 0:
-                        weights = conviction_weights(selected, max_weight=max_weight, power=conviction_power)
-
-                        target_cash_ratio = cash_floor
-                        if len(selected) == 1:
-                            target_cash_ratio = min(cash_ceiling, max(cash_floor, 0.10))
-                        elif len(selected) == 2:
-                            target_cash_ratio = min(cash_ceiling, max(cash_floor, 0.08))
-
-                        investable_capital = total_equity_before * (1 - target_cash_ratio)
-                        for tkr in weights.index:
-                            target_values[tkr] = investable_capital * weights[tkr]
-
-                        target_weights_log[date] = {
-                            tkr: (target_values[tkr] / total_equity_before) for tkr in weights.index
-                        }
-                        selected_assets_log[date] = selected.index.tolist()
-                    else:
-                        if soft_cash_mode:
-                            fallback_selected, fallback_weights, invest_ratio = build_soft_cash_selection(
-                                score_today=score_today,
-                                trend_ok=trend_ok,
-                                top_n=effective_top_n,
-                                min_score=min_score,
-                                invest_ratio=soft_invest_ratio,
-                                max_weight=max_weight,
-                                power=conviction_power,
-                            )
-                            if len(fallback_selected) > 0:
-                                investable_capital = total_equity_before * invest_ratio
-                                for tkr in fallback_weights.index:
-                                    target_values[tkr] = investable_capital * fallback_weights[tkr]
-                                target_weights_log[date] = {
-                                    tkr: (target_values[tkr] / total_equity_before) for tkr in fallback_weights.index
-                                }
-                                selected_assets_log[date] = fallback_selected.index.tolist()
-                            else:
-                                target_weights_log[date] = {}
-                                selected_assets_log[date] = []
-                        else:
-                            target_weights_log[date] = {}
-                            selected_assets_log[date] = []
-                else:
-                    if soft_cash_mode:
-                        fallback_selected, fallback_weights, invest_ratio = build_soft_cash_selection(
-                            score_today=score_today,
-                            trend_ok=trend_ok,
-                            top_n=effective_top_n,
-                            min_score=min_score,
-                            invest_ratio=max(cash_floor, 0.50),
-                            max_weight=max_weight,
-                            power=max(1.5, conviction_power - 0.5),
-                        )
-                        if len(fallback_selected) > 0:
-                            investable_capital = total_equity_before * invest_ratio
-                            for tkr in fallback_weights.index:
-                                target_values[tkr] = investable_capital * fallback_weights[tkr]
-                            target_weights_log[date] = {
-                                tkr: (target_values[tkr] / total_equity_before) for tkr in fallback_weights.index
-                            }
-                            selected_assets_log[date] = fallback_selected.index.tolist()
-                        else:
-                            target_weights_log[date] = {}
-                            selected_assets_log[date] = []
-                    else:
-                        target_weights_log[date] = {}
-                        selected_assets_log[date] = []
-
-                turnover = sum(abs(target_values[tkr] - current_values[tkr]) for tkr in tickers)
-                fees = turnover * fee_pct
-                total_equity_after_fees = max(total_equity_before - fees, 0.0)
-
-                if total_equity_before > 0:
-                    fee_adjustment = total_equity_after_fees / total_equity_before
-                    for tkr in tickers:
-                        target_values[tkr] *= fee_adjustment
-
-                buy_actions = []
-                sell_actions = []
-                taxes_due_total = 0.0
-
-                for tkr in tickers:
-                    price = float(current_prices[tkr])
-                    new_shares = target_values[tkr] / price if price > 0 else 0.0
-                    old_shares = shares[tkr]
-                    updated_shares, delta_value, tax_due = apply_trade_with_tax(
-                        ticker=tkr,
-                        current_shares=old_shares,
-                        target_shares=new_shares,
-                        price=price,
-                        lots_state=bot_lots_state,
-                        taxes_enabled=simulate_taxes_de,
-                        tax_state=bot_tax_state,
-                        tax_rate=tax_rate,
-                    )
-                    delta_shares = updated_shares - old_shares
-                    if abs(delta_shares) > 1e-12:
-                        trade_count += 1
-                        if delta_value > 1e-6:
-                            buy_actions.append(f"{tkr} (+{delta_value:,.0f}€)")
-                        elif delta_value < -1e-6:
-                            sell_actions.append(f"{tkr} ({delta_value:,.0f}€)")
-                    taxes_due_total += tax_due
-                    shares[tkr] = updated_shares
-
-                bot_tax_state["taxes_paid_total"] += taxes_due_total
-                invested_value = sum(shares[tkr] * current_prices[tkr] for tkr in tickers)
-                cash = total_equity_after_fees - invested_value - taxes_due_total
-
-                if not regime_today_ok:
-                    rebalance_reason = "Regime-Filter / Defensive Phase" if lang == "DE" else "Regime filter / defensive phase"
-                elif selected_assets_log.get(date):
-                    rebalance_reason = "Top-Assets nach Score & Trend gewichtet" if lang == "DE" else "Top assets weighted by score & trend"
-                elif soft_cash_mode:
-                    rebalance_reason = "Soft Cash Fallback" if lang == "DE" else "Soft cash fallback"
-                else:
-                    rebalance_reason = "Cash / keine starken Signale" if lang == "DE" else "Cash / no strong signals"
-
-                bh_monthly_action = "—"
-                if i > 0 and date.month != prev_date.month:
-                    per_asset_bh = monthly_savings / max(len(tickers), 1)
-                    bh_monthly_action = (
-                        f"{monthly_savings:,.0f}€ gleichmäßig auf {len(tickers)} Titel ({per_asset_bh:,.2f}€ je Titel)"
-                        if lang == "DE"
-                        else f"{monthly_savings:,.0f}€ spread evenly across {len(tickers)} names ({per_asset_bh:,.2f}€ each)"
-                    )
-
-                rebalance_log.append({
-                    T["date_col"]: date,
-                    T["regime_ok_col"]: regime_today_ok,
-                    T["selected_assets_col"]: ", ".join(selected_assets_log.get(date, [])) if selected_assets_log.get(date, []) else "Cash",
-                    T["buy_hold_action_col"]: bh_monthly_action,
-                    T["rebal_buys_col"]: ", ".join(buy_actions) if buy_actions else "—",
-                    T["rebal_sells_col"]: ", ".join(sell_actions) if sell_actions else "—",
-                    T["rebal_reason_col"]: rebalance_reason,
-                    T["turnover_col"]: float(turnover),
-                    T["fees_col"]: float(fees),
-                    T["taxes_col"]: float(taxes_due_total),
-                    T["cash_eur_col"]: float(cash),
-                    T["portfolio_eur_col"]: float(total_equity_after_fees),
-                })
-
-            invested_value = sum(shares[tkr] * current_prices[tkr] for tkr in tickers)
-            total_value = invested_value + cash
-
-            equity_bot.loc[date] = total_value
-            cash_bot.loc[date] = cash
-            invested_bot.loc[date] = invested_value
-            months_elapsed = (date.year - dates[0].year) * 12 + (date.month - dates[0].month)
-            cumulative_contributions.loc[date] = float(initial_capital + max(0, months_elapsed) * monthly_savings)
-
-            if total_value > 0:
-                for tkr in tickers:
-                    weight_history.loc[date, tkr] = (shares[tkr] * current_prices[tkr]) / total_value * 100
-                cash_weight_history.loc[date] = cash / total_value * 100
-            else:
-                for tkr in tickers:
-                    weight_history.loc[date, tkr] = 0.0
-                cash_weight_history.loc[date] = 0.0
-
-        # Benchmark
-        bh_shares = {tkr: 0.0 for tkr in tickers}
-        bh_lots_state = init_tax_lot_state(tickers)
-        bh_cash = 0.0
-        equity_bh = pd.Series(index=dates, dtype=float)
-        first_prices = prices.iloc[0]
-        bh_weight = 1.0 / len(tickers)
-
-        for tkr in tickers:
-            init_shares = (initial_capital * bh_weight) / first_prices[tkr]
-            bh_shares[tkr] = init_shares
-            bh_lots_state[tkr]["shares"] = init_shares
-            bh_lots_state[tkr]["cost_total"] = init_shares * float(first_prices[tkr])
-
-        for i, date in enumerate(dates):
-            current_prices = prices.loc[date]
-            current_year = int(date.year)
-            if bh_tax_state["year"] != current_year:
-                bh_tax_state["year"] = current_year
-                bh_tax_state["used_allowance"] = 0.0
-
-            if i > 0:
-                prev_date = dates[i - 1]
-                if date.month != prev_date.month:
-                    for tkr in tickers:
-                        price_now = float(current_prices[tkr])
-                        if price_now <= 0:
-                            continue
-                        add_shares = (monthly_savings * bh_weight) / price_now
-                        bh_shares[tkr] += add_shares
-                        bh_lots_state[tkr]["shares"] += add_shares
-                        bh_lots_state[tkr]["cost_total"] += add_shares * price_now
-
-            bh_value = sum(max(0.0, bh_shares[tkr]) * float(current_prices[tkr]) for tkr in tickers) + max(0.0, bh_cash)
-            equity_bh.loc[date] = max(0.0, bh_value)
-
-        bot_metrics = compute_metrics(equity_bot)
-        bh_metrics = compute_metrics(equity_bh)
-        exposure = (invested_bot / equity_bot.replace(0, np.nan)).mean() * 100
-        avg_cash_quote = (cash_bot / equity_bot.replace(0, np.nan)).mean() * 100
-        outperformance_pp = bot_metrics["total_return"] - bh_metrics["total_return"]
-
-        last_prices = prices.iloc[-1]
-        final_equity = equity_bot.iloc[-1]
-        current_weights = {}
-
-        for tkr in tickers:
-            current_weights[tkr] = (shares[tkr] * last_prices[tkr] / final_equity) * 100 if final_equity > 0 else 0.0
-
-        weights_df = pd.DataFrame({
-            T["weights_ticker_col"]: list(current_weights.keys()),
-            T["weights_current_col"]: list(current_weights.values()),
-        }).sort_values(T["weights_current_col"], ascending=False)
-
-        rebalance_df = pd.DataFrame(rebalance_log)
-        weights_with_cash = weight_history.copy()
-        weights_with_cash["Cash"] = cash_weight_history
-        weights_with_cash = weights_with_cash.fillna(0)
-
-        weights_chart_df = simplify_weight_chart(
-            weights_with_cash,
-            top_k=weight_chart_top_n,
-            other_label=T["other_label"],
-        )
-
-        rebalance_dates = [entry[T["date_col"]] for entry in rebalance_log]
-        weights_rebalance_only = weights_with_cash.loc[
-            weights_with_cash.index.intersection(rebalance_dates)
-        ].copy()
-
-        benchmark_equities = build_benchmark_equity_series(
-            get_benchmark_list(),
-            period,
-            dates,
-            float(initial_capital),
-            float(monthly_savings),
-        )
-
-        context = {
-            "bot_metrics": bot_metrics,
-            "bh_metrics": bh_metrics,
-            "exposure": exposure,
-            "avg_cash_quote": avg_cash_quote,
-            "outperformance_pp": outperformance_pp,
-            "trade_count": trade_count,
-            "conviction_power": conviction_power,
-            "soft_cash_mode": soft_cash_mode,
-            "target_cash_floor_pct": target_cash_floor_pct,
-            "target_cash_ceiling_pct": target_cash_ceiling_pct,
-            "equity_bot": equity_bot,
-            "equity_bh": equity_bh,
-            "cumulative_contributions": cumulative_contributions,
-            "cash_bot": cash_bot,
-            "invested_bot": invested_bot,
-            "rebalance_df": rebalance_df,
-            "weights_with_cash": weights_with_cash,
-            "weights_chart_df": weights_chart_df,
-            "weights_df": weights_df,
-            "selected_assets_log": selected_assets_log,
-            "target_weights_log": target_weights_log,
-            "weights_rebalance_only": weights_rebalance_only,
-            "show_debug": show_debug,
-            "tickers": tickers,
-            "skipped_tickers": skipped_tickers,
-            "top_n": top_n,
-            "effective_top_n": effective_top_n,
-            "max_weight_pct": max_weight_pct,
-            "use_regime_filter": use_regime_filter,
-            "prices": prices,
-            "raw_score": raw_score,
-            "benchmark_equities": benchmark_equities,
-            "simulate_taxes_de": simulate_taxes_de,
-            "bot_taxes_paid": bot_tax_state["taxes_paid_total"],
-            "bh_taxes_paid": bh_tax_state["taxes_paid_total"],
-        }
+        context["skipped_tickers"] = skipped_tickers + [t for t in dropped_after_align if t not in skipped_tickers]
         st.session_state["last_calc_results"] = context
         render_calculation_results(context, T, lang, tier)
         save_logged_in_user_state()
