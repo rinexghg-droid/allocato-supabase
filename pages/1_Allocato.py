@@ -506,7 +506,7 @@ def get_max_baskets() -> int:
     return 1 if get_current_tier() == "Free" else 999
 
 def get_max_period() -> str:
-    return "3y" if get_current_tier() == "Free" else "max"
+    return "3y" if get_current_tier() == "Free" else "5y"
 
 def can_use_asset_search() -> bool:
     return get_current_tier() in ["Basic", "Pro", "Lifetime"]
@@ -521,7 +521,7 @@ defaults = {
     "language": "DE",
     "initial_capital": 10000,
     "monthly_savings": 500,
-    "period": get_max_period(),
+    "period": "3y" if get_current_tier() == "Free" else "5y",
     "rebalance_freq": "Monatlich",
     "fee_pct_input": 0.10,
     "min_score": 0.00,
@@ -1061,6 +1061,9 @@ TRANSLATIONS = {
         "metric_sharpe": "Bot Sharpe",
         "metric_net_bot": "Netto nach Steuern (Bot)",
         "metric_net_bh": "Netto nach Steuern (Buy & Hold)",
+        "gross_net_info": "Die obere Zahl ist brutto. Die untere Zahl zeigt den Wert nach Abgeltungsteuer (26,375 % + 1.000 € Freistellungsbetrag pro Jahr).",
+        "how_returns_expander": "🧭 Wie kommen diese Renditen zustande?",
+        "how_returns_text": "- **Tägliche Neubewertung:** Jeden Handelstag wird jedes Asset anhand von Trend, Momentum, Quality, Risk, Regime-Fit und KI-Overlay neu gescort.\n- **Selektion:** Aus dem Korb werden nur die stärksten Titel priorisiert, statt alles blind gleich zu gewichten.\n- **Conviction-Weighting:** Höhere Scores bekommen mehr Kapital, schwächere Titel weniger.\n- **Regime-Adaptation:** Je nach Marktumfeld verschiebt die Engine die Gewichtung zwischen offensiverem und defensiverem Verhalten.\n- **Cash-Management:** Wenn Signale schwächer werden, kann bewusst ein Teil des Kapitals in Cash bleiben, statt immer 100 % investiert zu sein.\n- **Rebalancing nach Einstellung:** Gehandelt wird exakt in der vom Nutzer gewählten Frequenz; die tägliche Bewertung bleibt trotzdem aktiv.",
         "tax_gross_net_text": ("- **Brutto vs. Netto:** Ohne Steuern wirkt aktive Umschichtung oft zu stark. Sobald reale Steuerabflüsse auf realisierte Gewinne berücksichtigt werden, sinkt der frei verfügbare Cash-Puffer des Bots.\n"
                                 "- **Warum Buy & Hold meist näher an Brutto bleibt:** Buy & Hold verkauft in dieser Simulation fast nichts. Dadurch werden Gewinne meist nicht laufend versteuert, sondern bleiben investiert.\n"
                                 "- **Warum der Bot trotzdem vorn bleiben kann:** Der Bot versucht trotz Steuerabzügen, durch Selektion, Cash-Management und Rebalancing effizientere Kapitalpfade zu finden."),
@@ -1368,6 +1371,9 @@ TRANSLATIONS = {
         "metric_sharpe": "Bot Sharpe",
         "metric_net_bot": "Net after taxes (Bot)",
         "metric_net_bh": "Net after taxes (Buy & Hold)",
+        "gross_net_info": "The upper number is gross. The lower number shows the value after German capital gains tax (26.375% + €1,000 annual allowance).",
+        "how_returns_expander": "🧭 How do these returns come together?",
+        "how_returns_text": "- **Daily reassessment:** Every trading day, each asset is rescored using trend, momentum, quality, risk, regime fit and the AI overlay.\n- **Selection:** Only the strongest names in the universe are prioritized instead of blindly weighting everything equally.\n- **Conviction weighting:** Higher scores receive more capital, weaker names receive less.\n- **Regime adaptation:** Depending on the market regime, the engine shifts between more offensive and more defensive behavior.\n- **Cash management:** When signals weaken, part of the capital can stay in cash instead of forcing a constant 100% allocation.\n- **Rebalancing by setting:** Trading happens exactly at the user-selected frequency, while the daily assessment remains active.",
         "tax_gross_net_text": ("- **Gross vs. net:** Without taxes, active rebalancing can look too strong. Once real tax drag on realized gains is included, the bot loses part of its free cash buffer.\n"
                                 "- **Why Buy & Hold often stays closer to gross:** Buy & Hold rarely sells in this simulation. Gains therefore remain mostly untaxed during the run and continue compounding.\n"
                                 "- **Why the bot can still stay ahead:** Even after taxes, the bot may still benefit from selection, cash management and rebalancing discipline."),
@@ -2607,14 +2613,14 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     prices = sanitize_price_panel(prices.sort_index().copy())
     tickers = list(prices.columns)
     effective_top_n = min(top_n, len(tickers))
-    max_weight_pct = int(np.clip(max_weight_pct, 1, 30))
+    max_weight_pct = int(np.clip(max_weight_pct, 1, 50))
     max_weight = max_weight_pct / 100.0
     daily_cash_rate = (cash_interest_pct / 100.0) / 252.0
-    cash_floor = max(target_cash_floor_pct / 100.0, 0.02)
-    cash_ceiling = min(max(target_cash_ceiling_pct / 100.0, 0.08), 0.12)
+    cash_floor = float(np.clip(target_cash_floor_pct / 100.0, 0.0, 0.25))
+    cash_ceiling = float(np.clip(target_cash_ceiling_pct / 100.0, 0.05, 0.30))
     if cash_floor > cash_ceiling:
         cash_floor = min(cash_floor, cash_ceiling)
-    soft_invest_ratio = max(soft_cash_invest_ratio_pct / 100.0, 0.98 if soft_cash_mode else 0.90)
+    soft_invest_ratio = float(np.clip(soft_cash_invest_ratio_pct / 100.0, 0.70, 1.0))
     tax_rate = 0.26375
     bot_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
     bh_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
@@ -2752,18 +2758,11 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         }
 
         held_assets = [tickers[idx] for idx, s in enumerate(shares_arr) if s > 1e-12]
-        threshold_trigger, threshold_reason = should_threshold_rebalance(
-            date=date,
-            regime_code=regime_code,
-            held_assets=held_assets,
-            selected_assets=cached_selected_assets,
-            current_weight_map=current_weight_map,
-            target_weight_map=cached_target_weight_map,
-            score_today=total_score.loc[date],
-            component_scores=component_scores,
-            last_regime_code=last_regime_code,
-        )
-        do_rebalance = scheduled_rebalance or threshold_trigger or (i == 0) or (regime_code_today != last_regime_code and i > 0)
+        threshold_trigger = False
+        threshold_reason = "Kein Schwellen-Trigger" if lang == "DE" else "No threshold trigger"
+
+        # Exaktes Rebalancing nach Nutzereinstellung: keine zusätzlichen Tages-Trigger.
+        do_rebalance = bool(scheduled_rebalance)
 
         if do_rebalance:
             turnover = float(np.nansum(np.abs(target_values - current_values_np)))
@@ -3007,6 +3006,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     )
 
     latest_top_asset_explanations = []
+    gross_bot_end = float(max(0.0, safe_float(equity_bot.iloc[-1], default=0.0) + safe_float(bot_tax_state["taxes_paid_total"], default=0.0)))
+    gross_bh_end = float(max(0.0, safe_float(equity_bh.iloc[-1], default=0.0) + safe_float(bh_tax_state["taxes_paid_total"], default=0.0)))
     return {
         "bot_metrics": bot_metrics,
         "bh_metrics": bh_metrics,
@@ -3045,6 +3046,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         "simulate_taxes_de": simulate_taxes_de,
         "bot_taxes_paid": bot_tax_state["taxes_paid_total"],
         "bh_taxes_paid": bh_tax_state["taxes_paid_total"],
+        "gross_bot_end": gross_bot_end,
+        "gross_bh_end": gross_bh_end,
         "regime_df": regime_df,
         "regime_summary_df": regime_summary_df,
         "latest_score_breakdown_df": latest_score_breakdown_df,
@@ -3162,6 +3165,8 @@ def render_calculation_results(context, T, lang, tier):
     simulate_taxes_de = context.get("simulate_taxes_de", False)
     bot_taxes_paid = context.get("bot_taxes_paid", 0.0)
     bh_taxes_paid = context.get("bh_taxes_paid", 0.0)
+    gross_bot_end = float(context.get("gross_bot_end", float(equity_bot.iloc[-1])))
+    gross_bh_end = float(context.get("gross_bh_end", float(equity_bh.iloc[-1])))
     alignment_info = context.get("alignment_info", {})
 
     st.write("DEBUG Bot Rendite:", f"{bot_metrics['total_return']:.2f}%")
@@ -3183,8 +3188,8 @@ def render_calculation_results(context, T, lang, tier):
     
     # Metrics
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric(T["metric_bot_end"], f"{equity_bot.iloc[-1]:,.2f} €")
-    c2.metric(T["metric_bh_end"], f"{equity_bh.iloc[-1]:,.2f} €")
+    c1.metric(T["metric_bot_end"], f"{gross_bot_end:,.2f} €")
+    c2.metric(T["metric_bh_end"], f"{gross_bh_end:,.2f} €")
     c3.metric(T["metric_outperf"], f"{outperformance_pp:.2f} pp")
     c4.metric(T["metric_trades"], f"{trade_count}")
     
@@ -3237,13 +3242,14 @@ def render_calculation_results(context, T, lang, tier):
                 )
             )
     
-    st.success(T["end_capital_success"].format(value=f"{equity_bot.iloc[-1]:,.2f} €"))
+    st.success(T["end_capital_success"].format(value=f"{gross_bot_end:,.2f} €"))
+    st.caption(T["gross_net_info"])
+    net_col_1, net_col_2 = st.columns(2)
+    with net_col_1:
+        render_net_tax_badge(T["metric_net_bot"], float(equity_bot.iloc[-1]), float(cumulative_contributions.iloc[-1]))
+    with net_col_2:
+        render_net_tax_badge(T["metric_net_bh"], float(equity_bh.iloc[-1]), float(cumulative_contributions.iloc[-1]))
     if simulate_taxes_de:
-        net_col_1, net_col_2 = st.columns(2)
-        with net_col_1:
-            render_net_tax_badge(T["metric_net_bot"], float(equity_bot.iloc[-1]), float(cumulative_contributions.iloc[-1]))
-        with net_col_2:
-            render_net_tax_badge(T["metric_net_bh"], float(equity_bh.iloc[-1]), float(cumulative_contributions.iloc[-1]))
         st.caption(f"🇩🇪 {T['taxes_col']}: Bot {bot_taxes_paid:,.2f} € | Buy & Hold {bh_taxes_paid:,.2f} €")
     st.markdown(
         f"""
@@ -3394,6 +3400,9 @@ def render_calculation_results(context, T, lang, tier):
         if context.get("ki_explanations_df") is not None:
             st.markdown("### KI-Overlay Erklärungen" if lang == "DE" else "### AI Overlay Explanations")
             st.dataframe(context["ki_explanations_df"], use_container_width=True)
+
+    with st.expander(T["how_returns_expander"], expanded=False):
+        st.markdown(T["how_returns_text"])
     
     with st.expander(T["annual_returns_title"], expanded=True):
         if not annual_returns_df.empty:
@@ -4018,7 +4027,7 @@ rebalance_options = T["rebalance_options"]
 
 period_options = ["1y", "2y", "3y"] if tier == "Free" else ["1y", "2y", "3y", "5y", "10y", "15y", "20y", "max"]
 if st.session_state.period not in period_options:
-    st.session_state.period = period_options[-1]
+    st.session_state.period = "3y" if tier == "Free" else "5y"
 
 period = st.sidebar.selectbox(
     T["period"],
@@ -4053,25 +4062,25 @@ min_score = st.sidebar.number_input(
 
 if "max_weight_pct" in st.session_state:
     try:
-        st.session_state["max_weight_pct"] = int(np.clip(int(st.session_state.get("max_weight_pct", 30)), 1, 30))
+        st.session_state["max_weight_pct"] = int(np.clip(int(st.session_state.get("max_weight_pct", 30)), 1, 50))
     except Exception:
         st.session_state["max_weight_pct"] = 30
 
 if "vol_penalty" in st.session_state:
     try:
-        st.session_state["vol_penalty"] = float(np.clip(float(st.session_state.get("vol_penalty", 0.08)), 0.0, 2.0))
+        st.session_state["vol_penalty"] = float(np.clip(float(st.session_state.get("vol_penalty", 0.08)), 0.0, 3.0))
     except Exception:
         st.session_state["vol_penalty"] = 0.08
 
 if "conviction_power" in st.session_state:
     try:
-        st.session_state["conviction_power"] = float(np.clip(float(st.session_state.get("conviction_power", 1.8)), 1.0, 3.0))
+        st.session_state["conviction_power"] = float(np.clip(float(st.session_state.get("conviction_power", 1.8)), 1.0, 3.5))
     except Exception:
         st.session_state["conviction_power"] = 1.8
 
 if "target_cash_ceiling_pct" in st.session_state:
     try:
-        st.session_state["target_cash_ceiling_pct"] = int(np.clip(int(st.session_state.get("target_cash_ceiling_pct", 8)), 5, 12))
+        st.session_state["target_cash_ceiling_pct"] = int(np.clip(int(st.session_state.get("target_cash_ceiling_pct", 8)), 5, 30))
     except Exception:
         st.session_state["target_cash_ceiling_pct"] = 8
 
@@ -4079,7 +4088,7 @@ if "target_cash_ceiling_pct" in st.session_state:
 max_weight_pct = st.sidebar.number_input(
     T["max_weight"],
     min_value=1,
-    max_value=30,
+    max_value=50,
     step=5,
     key="max_weight_pct",
     help=T["max_weight_help"],
@@ -4088,7 +4097,7 @@ max_weight_pct = st.sidebar.number_input(
 vol_penalty = st.sidebar.number_input(
     T["vol_penalty"],
     min_value=0.0,
-    max_value=2.0,
+    max_value=3.0,
     step=0.05,
     format="%.2f",
     key="vol_penalty",
@@ -4121,7 +4130,7 @@ st.sidebar.subheader(T["aggressive_mode"])
 conviction_power = st.sidebar.slider(
     T["conviction"],
     min_value=1.0,
-    max_value=3.0,
+    max_value=3.5,
     step=0.1,
     key="conviction_power",
     help=T["conviction_help"],
@@ -4136,7 +4145,7 @@ soft_cash_mode = st.sidebar.checkbox(
 target_cash_floor_pct = st.sidebar.slider(
     T["cash_floor"],
     min_value=0,
-    max_value=20,
+    max_value=25,
     step=1,
     key="target_cash_floor_pct",
     help=T["cash_floor_help"],
@@ -4145,14 +4154,14 @@ target_cash_floor_pct = st.sidebar.slider(
 
 if "soft_cash_invest_ratio_pct" in st.session_state:
     try:
-        st.session_state["soft_cash_invest_ratio_pct"] = int(np.clip(int(st.session_state.get("soft_cash_invest_ratio_pct", 95)), 20, 100))
+        st.session_state["soft_cash_invest_ratio_pct"] = int(np.clip(int(st.session_state.get("soft_cash_invest_ratio_pct", 98)), 70, 100))
     except Exception:
         st.session_state["soft_cash_invest_ratio_pct"] = 95
 
 target_cash_ceiling_pct = st.sidebar.slider(
     T["cash_ceiling"],
     min_value=5,
-    max_value=12,
+    max_value=30,
     step=1,
     key="target_cash_ceiling_pct",
     help=T["cash_ceiling_help"],
@@ -4160,7 +4169,7 @@ target_cash_ceiling_pct = st.sidebar.slider(
 
 soft_cash_invest_ratio_pct = st.sidebar.slider(
     T["soft_cash_ratio"],
-    min_value=20,
+    min_value=70,
     max_value=100,
     step=5,
     key="soft_cash_invest_ratio_pct",
