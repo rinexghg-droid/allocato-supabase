@@ -1805,8 +1805,10 @@ def stabilize_equity_series(
     return out.ffill().fillna(0.0)
 
 def safe_portfolio_cap(initial_capital: float, monthly_savings: float, periods: int) -> float:
-    total_contrib = float(initial_capital) + max(0, periods) * float(monthly_savings)
-    realistic_cap = max(total_contrib * 100.0, 1_000_000.0)
+    trading_days = max(int(periods), 0)
+    approx_months = max(1, int(np.ceil(trading_days / 21.0)))
+    total_contrib = float(initial_capital) + approx_months * float(monthly_savings)
+    realistic_cap = max(total_contrib * 250.0, 10_000_000.0)
     return realistic_cap
 
 
