@@ -142,6 +142,8 @@ def ensure_auth_session_state():
         "auth_is_admin": False,
         "cancel_subscription_confirmed": False,
         "last_calc_results": None,
+        "auth_last_email": "",
+        "period_user_override": False,
     }
     for key, value in auth_defaults.items():
         if key not in st.session_state:
@@ -244,6 +246,7 @@ def create_user(email: str, password: str) -> tuple[bool, str]:
         st.session_state["subscription_tier"] = "Free"
         st.session_state["subscription_expires_at"] = ""
         st.session_state["auth_loaded_for"] = ""
+        st.session_state["auth_last_email"] = normalized
         return True, "Registrierung erfolgreich."
     except Exception as e:
         return False, f"Registrierung fehlgeschlagen: {e}"
@@ -282,6 +285,7 @@ def login_user(email: str, password: str) -> tuple[bool, str]:
     st.session_state["auth_user_email"] = normalized
     st.session_state["auth_is_admin"] = normalized in ADMIN_EMAILS
     st.session_state["subscription_tier"] = resolve_effective_tier(normalized, row.get("subscription_tier"))
+    st.session_state["auth_last_email"] = normalized
     st.session_state["subscription_expires_at"] = row.get("subscription_expires_at") or get_default_subscription_expiry(st.session_state["subscription_tier"])
     ensure_subscription_expiry_for_tier(st.session_state["subscription_tier"])
     st.session_state["auth_loaded_for"] = ""
@@ -295,6 +299,7 @@ def logout_user():
     st.session_state["auth_is_admin"] = False
     st.session_state["subscription_tier"] = "Free"
     st.session_state["subscription_expires_at"] = ""
+    st.session_state["auth_last_email"] = ""
 
 def update_user_password(email: str, current_password: str, new_password: str) -> tuple[bool, str]:
     normalized = normalize_email(email)
@@ -353,6 +358,7 @@ def update_user_email(current_email: str, password: str, new_email: str) -> tupl
             "updated_at": now,
         }).eq("email", normalized_current).execute()
         st.session_state["auth_user_email"] = normalized_new
+        st.session_state["auth_last_email"] = normalized_new
         st.session_state["auth_loaded_for"] = ""
         st.session_state["auth_is_admin"] = normalized_new in ADMIN_EMAILS
         return True, "✨ E-Mail erfolgreich aktualisiert."
@@ -467,6 +473,26 @@ def get_auth_texts(lang: str) -> dict:
     }
 
 ensure_auth_session_state()
+
+def restore_auth_session_if_possible():
+    if st.session_state.get("auth_logged_in"):
+        return
+    remembered_email = normalize_email(st.session_state.get("auth_last_email", "") or st.session_state.get("auth_user_email", ""))
+    if not remembered_email:
+        return
+    try:
+        row = get_user_row(remembered_email)
+    except Exception:
+        return
+    if row is None:
+        return
+    st.session_state["auth_logged_in"] = True
+    st.session_state["auth_user_email"] = remembered_email
+    st.session_state["auth_is_admin"] = remembered_email in ADMIN_EMAILS
+    st.session_state["subscription_tier"] = resolve_effective_tier(remembered_email, row.get("subscription_tier"))
+    st.session_state["subscription_expires_at"] = row.get("subscription_expires_at") or get_default_subscription_expiry(st.session_state["subscription_tier"])
+    ensure_subscription_expiry_for_tier(st.session_state["subscription_tier"])
+    st.session_state["auth_loaded_for"] = ""
 
 def maybe_handle_payment_query(lang: str):
     payment_status = str(st.query_params.get("payment", "")).strip().lower()
@@ -619,6 +645,8 @@ PERSISTENT_STATE_KEYS = [
     "baskets",
     "active_basket",
     "last_loaded_basket",
+    "auth_last_email",
+    "period_user_override",
 ]
 
 def build_user_state_payload() -> dict:
@@ -687,6 +715,7 @@ def enforce_plan_limits():
         if int(st.session_state.get("top_n", 4)) > 4:
             st.session_state["top_n"] = 4
 
+restore_auth_session_if_possible()
 load_logged_in_user_state()
 enforce_plan_limits()
 ensure_subscription_expiry_for_tier(st.session_state.get("subscription_tier", "Free"))
@@ -832,6 +861,28 @@ ASSET_CATALOG = [
     {"ticker": "HEI.DE", "name": "Heidelberg Materials", "isin": "DE0006047004", "wkn": "604700"},
 ]
 ASSET_CATALOG_DF = pd.DataFrame(ASSET_CATALOG).drop_duplicates(subset=["ticker"]).reset_index(drop=True)
+ASSET_NAME_MAP = {str(row["ticker"]): str(row["name"]) for row in ASSET_CATALOG}
+
+def get_asset_name(ticker: str) -> str:
+    return ASSET_NAME_MAP.get(str(ticker), str(ticker))
+
+def get_asset_display_label(ticker: str) -> str:
+    ticker = str(ticker)
+    name = get_asset_name(ticker)
+    if name == ticker:
+        return ticker
+    return f"{ticker} · {name}"
+
+def rename_series_or_df_labels(obj):
+    if isinstance(obj, pd.Series):
+        out = obj.copy()
+        out.index = [get_asset_display_label(idx) if str(idx) != "Cash" else "Cash" for idx in out.index]
+        return out
+    if isinstance(obj, pd.DataFrame):
+        out = obj.copy()
+        out.columns = [get_asset_display_label(col) if str(col) != "Cash" else "Cash" for col in out.columns]
+        return out
+    return obj
 
 # =========================
 # Translation
@@ -1468,6 +1519,17 @@ def get_basket_limit() -> int:
 def queue_preset(name: str):
     st.session_state["_pending_preset"] = name
 
+def mark_period_user_override():
+    st.session_state["period_user_override"] = True
+
+def auto_adjust_period_for_large_baskets(asset_count: int, tier_now: str):
+    if tier_now == "Free" or st.session_state.get("period_user_override", False):
+        return
+    recommended = "10y" if asset_count <= 50 else "5y"
+    current_period = st.session_state.get("period", defaults["period"])
+    if current_period in {"15y", "20y", "max"} or (current_period == defaults.get("period") and asset_count > 30):
+        st.session_state["period"] = recommended
+
 def apply_pending_preset():
     preset_name = st.session_state.get("_pending_preset")
     if preset_name and preset_name in PRESETS:
@@ -1509,17 +1571,28 @@ def remove_ticker_from_basket(ticker: str):
     set_basket_list(basket)
 
 def filter_asset_catalog(query: str) -> pd.DataFrame:
-    if not query.strip():
-        return ASSET_CATALOG_DF.copy()
-    q = query.strip().lower()
     df = ASSET_CATALOG_DF.copy()
-    mask = (
+    if not query.strip():
+        return df.head(12).copy()
+    q = query.strip().lower()
+    exact_ticker = df["ticker"].str.lower().eq(q)
+    starts_ticker = df["ticker"].str.lower().str.startswith(q, na=False)
+    starts_name = df["name"].str.lower().str.startswith(q, na=False)
+    contains_mask = (
         df["ticker"].str.lower().str.contains(q, na=False) |
         df["name"].str.lower().str.contains(q, na=False) |
         df["isin"].str.lower().str.contains(q, na=False) |
         df["wkn"].str.lower().str.contains(q, na=False)
     )
-    return df.loc[mask].copy()
+    ranked = df.loc[contains_mask].copy()
+    if ranked.empty:
+        return ranked
+    ranked["_rank"] = 3
+    ranked.loc[starts_name.loc[ranked.index], "_rank"] = 2
+    ranked.loc[starts_ticker.loc[ranked.index], "_rank"] = 1
+    ranked.loc[exact_ticker.loc[ranked.index], "_rank"] = 0
+    ranked = ranked.sort_values(["_rank", "ticker", "name"]).drop(columns=["_rank"])
+    return ranked.head(12).copy()
 
 def format_search_option(row: pd.Series, T: dict) -> str:
     return T["search_option_format"].format(
@@ -1980,14 +2053,14 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
     cached = _load_close_prices_cached(tuple(tickers), period)
 
     if progress_bar is not None:
-        progress_bar.progress(0.80, text=(f"Verarbeite {len(tickers)} Assets…" if st.session_state.get("language", "DE") == "DE" else f"Processing {len(tickers)} assets…"))
+        progress_bar.progress(0.22, text=("Bereite Bulk-Download vor …" if st.session_state.get("language", "DE") == "DE" else "Preparing bulk download …"))
 
     series_map = cached.get("series_map", {})
     skipped = cached.get("skipped", [])
     partial_history = cached.get("partial_history", [])
 
     if progress_bar is not None:
-        progress_bar.progress(1.0, text=(f"{len(series_map)}/{total} Assets geladen" if st.session_state.get("language", "DE") == "DE" else f"{len(series_map)}/{total} assets loaded"))
+        progress_bar.progress(0.32, text=(f"{len(series_map)}/{total} Assets geladen" if st.session_state.get("language", "DE") == "DE" else f"{len(series_map)}/{total} assets loaded"))
         progress_bar.empty()
     if status_box is not None:
         status_box.success(
@@ -2466,6 +2539,12 @@ def compute_ai_overlay_scores(prices: pd.DataFrame, component_scores: dict, lang
     return overlay, explanations
 
 
+@st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
+def compute_regime_and_scores_cached(prices: pd.DataFrame, period: str, lang: str, vol_penalty: float):
+    regime_df, component_scores, ai_overlay_scores, ai_explanations, total_score = compute_regime_and_scores_cached(prices, period, lang, vol_penalty)
+    return regime_df, component_scores, ai_overlay_scores, ai_explanations, total_score
+
+
 def compute_total_score_by_regime(prices: pd.DataFrame, regime_df: pd.DataFrame, component_scores: dict, ai_overlay: pd.DataFrame) -> pd.DataFrame:
     total = pd.DataFrame(index=prices.index, columns=prices.columns, dtype=float)
     for dt in prices.index:
@@ -2609,7 +2688,8 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
         "cash_target": min(max(cash_floor, profile["cash_target"]), cash_ceiling),
     }
 
-def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, top_n: int, simulate_taxes_de: bool, alignment_info: dict | None = None):
+@st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
+def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, top_n: int, simulate_taxes_de: bool, benchmark_tickers: tuple = (), weight_chart_top_n_value: int = 8, enable_ki_explanations_flag: bool = False, use_regime_filter_flag: bool = False, alignment_info: dict | None = None):
     prices = sanitize_price_panel(prices.sort_index().copy())
     tickers = list(prices.columns)
     effective_top_n = min(top_n, len(tickers))
@@ -2625,10 +2705,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     bot_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
     bh_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
 
-    regime_df, _ = compute_market_regime(prices, period, lang)
-    component_scores = compute_component_score_table(prices, regime_df, vol_penalty)
-    ai_overlay_scores, ai_explanations = compute_ai_overlay_scores(prices, component_scores, lang)
-    total_score = compute_total_score_by_regime(prices, regime_df, component_scores, ai_overlay_scores)
+    regime_df, component_scores, ai_overlay_scores, ai_explanations, total_score = compute_regime_and_scores_cached(prices, period, lang, vol_penalty)
 
     row_valid_assets = total_score.notna().sum(axis=1)
     valid_mask = row_valid_assets >= 2
@@ -2861,18 +2938,18 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
             reason_parts.append(regime_df.loc[date, "regime"])
 
             rebalance_log.append({
-                T["date_col"]: date,
-                T["regime_ok_col"]: regime_df.loc[date, "regime"],
-                T["selected_assets_col"]: ", ".join(list(selected.index)) if len(selected) else "Cash",
-                T["buy_hold_action_col"]: bh_monthly_action,
-                T["rebal_buys_col"]: ", ".join(buy_actions) if buy_actions else "—",
-                T["rebal_sells_col"]: ", ".join(sell_actions) if sell_actions else "—",
-                T["rebal_reason_col"]: " | ".join(reason_parts),
-                T["turnover_col"]: float(turnover),
-                T["fees_col"]: float(fees),
-                T["taxes_col"]: float(taxes_due_total),
-                T["cash_eur_col"]: float(cash),
-                T["portfolio_eur_col"]: float(total_equity_after_fees),
+                T_local["date_col"]: date,
+                T_local["regime_ok_col"]: regime_df.loc[date, "regime"],
+                T_local["selected_assets_col"]: ", ".join(list(selected.index)) if len(selected) else "Cash",
+                T_local["buy_hold_action_col"]: bh_monthly_action,
+                T_local["rebal_buys_col"]: ", ".join(buy_actions) if buy_actions else "—",
+                T_local["rebal_sells_col"]: ", ".join(sell_actions) if sell_actions else "—",
+                T_local["rebal_reason_col"]: " | ".join(reason_parts),
+                T_local["turnover_col"]: float(turnover),
+                T_local["fees_col"]: float(fees),
+                T_local["taxes_col"]: float(taxes_due_total),
+                T_local["cash_eur_col"]: float(cash),
+                T_local["portfolio_eur_col"]: float(total_equity_after_fees),
             })
 
             last_regime_code = regime_code
@@ -2966,19 +3043,20 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         for idx, t in enumerate(tickers)
     }
     weights_df = pd.DataFrame({
-        T["weights_ticker_col"]: list(current_weights.keys()),
-        T["weights_current_col"]: list(current_weights.values()),
-    }).sort_values(T["weights_current_col"], ascending=False)
+        T_local["weights_ticker_col"]: list(current_weights.keys()),
+        T_local["weights_current_col"]: list(current_weights.values()),
+    }).sort_values(T_local["weights_current_col"], ascending=False)
 
     rebalance_df = pd.DataFrame(rebalance_log)
     weights_with_cash = weight_history.copy()
     weights_with_cash["Cash"] = cash_weight_history
     weights_with_cash = weights_with_cash.fillna(0.0).clip(lower=0.0, upper=100.0)
-    weights_chart_df = simplify_weight_chart(weights_with_cash, top_k=weight_chart_top_n, other_label=T["other_label"])
-    rebalance_dates = [entry[T["date_col"]] for entry in rebalance_log]
+    T_local = TRANSLATIONS[lang]
+    weights_chart_df = simplify_weight_chart(weights_with_cash, top_k=weight_chart_top_n_value, other_label=T_local["other_label"])
+    rebalance_dates = [entry[T_local["date_col"]] for entry in rebalance_log]
     weights_rebalance_only = weights_with_cash.loc[weights_with_cash.index.intersection(rebalance_dates)].copy()
 
-    benchmark_equities = build_benchmark_equity_series(get_benchmark_list(), period, dates, float(initial_capital), float(monthly_savings))
+    benchmark_equities = build_benchmark_equity_series(list(benchmark_tickers), period, dates, float(initial_capital), float(monthly_savings))
 
     latest_dt = dates[-1]
     latest_score_breakdown_df = pd.DataFrame({
@@ -3039,7 +3117,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         "top_n": top_n,
         "effective_top_n": effective_top_n,
         "max_weight_pct": max_weight_pct,
-        "use_regime_filter": use_regime_filter,
+        "use_regime_filter": use_regime_filter_flag,
         "prices": prices,
         "raw_score": total_score,
         "benchmark_equities": benchmark_equities,
@@ -3053,7 +3131,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         "latest_score_breakdown_df": latest_score_breakdown_df,
         "ki_explanations_df": ki_explanations_df,
         "latest_top_asset_explanations": latest_top_asset_explanations,
-        "enable_ki_explanations": bool(st.session_state.get("enable_ki_explanations", False)),
+        "enable_ki_explanations": bool(enable_ki_explanations_flag),
         "estimated_tax_drag_pct_map": estimated_tax_drag_pct_map,
         "alignment_info": alignment_info or {},
         "portfolio_cap": portfolio_cap,
@@ -3161,6 +3239,7 @@ def render_calculation_results(context, T, lang, tier):
     prices = context["prices"]
     raw_score = context["raw_score"]
     annual_returns_df = compute_annual_returns(equity_bot, equity_bh, T)
+    ticker_label_map = {ticker: get_asset_display_label(ticker) for ticker in tickers}
     benchmark_equities = context.get("benchmark_equities", {})
     simulate_taxes_de = context.get("simulate_taxes_de", False)
     bot_taxes_paid = context.get("bot_taxes_paid", 0.0)
@@ -3168,10 +3247,6 @@ def render_calculation_results(context, T, lang, tier):
     gross_bot_end = float(context.get("gross_bot_end", float(equity_bot.iloc[-1])))
     gross_bh_end = float(context.get("gross_bh_end", float(equity_bh.iloc[-1])))
     alignment_info = context.get("alignment_info", {})
-
-    st.write("DEBUG Bot Rendite:", f"{bot_metrics['total_return']:.2f}%")
-    st.write("DEBUG BH Rendite:", f"{bh_metrics['total_return']:.2f}%")
-    st.write("DEBUG Outperformance:", f"{outperformance_pp:.2f} pp")
 
     # Status
     if outperformance_pp > 0:
@@ -3287,15 +3362,16 @@ def render_calculation_results(context, T, lang, tier):
         )
     )
     for bench_name, bench_equity in benchmark_equities.items():
+        bench_label = get_asset_display_label(bench_name)
         equity_fig.add_trace(
             go.Scatter(
                 x=bench_equity.index,
                 y=bench_equity.values,
                 mode="lines",
-                name=bench_name,
+                name=bench_label,
                 line=dict(width=1.4),
                 opacity=0.9,
-                hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + bench_name + "</extra>",
+                hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + bench_label + "</extra>",
             )
         )
     equity_fig.add_trace(
@@ -3319,7 +3395,7 @@ def render_calculation_results(context, T, lang, tier):
     )
     st.plotly_chart(equity_fig, use_container_width=True)
     if benchmark_equities:
-        st.caption((T["benchmark_added_title"] + ": " + ", ".join(benchmark_equities.keys())))
+        st.caption((T["benchmark_added_title"] + ": " + ", ".join(get_asset_display_label(k) for k in benchmark_equities.keys())))
     
     # Export
     st.markdown(f"### {T['export_title']}")
@@ -3416,19 +3492,21 @@ def render_calculation_results(context, T, lang, tier):
             )
 
     st.subheader(T["current_weights"])
-    active_weights_df = weights_df[weights_df[T["weights_current_col"]] > 0].copy()
+    weights_df_display = weights_df.copy()
+    weights_df_display[T["weights_ticker_col"]] = weights_df_display[T["weights_ticker_col"]].map(lambda x: ticker_label_map.get(x, x))
+    active_weights_df = weights_df_display[weights_df_display[T["weights_current_col"]] > 0].copy()
     if not active_weights_df.empty:
         st.dataframe(active_weights_df.round(2), use_container_width=True)
     else:
         st.info(T["active_positions_empty"])
     
     with st.expander(T["show_all_assets"]):
-        st.dataframe(weights_df.round(2), use_container_width=True)
+        st.dataframe(weights_df_display.round(2), use_container_width=True)
     
     st.subheader(T["weights_chart_title"])
     st.caption(T["weights_chart_caption"])
     
-    weights_plot_df = weights_chart_df.copy()
+    weights_plot_df = rename_series_or_df_labels(weights_chart_df.copy())
     weights_fig = go.Figure()
     
     for col in weights_plot_df.columns:
@@ -3663,6 +3741,26 @@ st.markdown(
     }
     div[data-testid="stButton"] button[kind="secondary"][data-baseweb="button"] {
         min-height: 2.6rem;
+    }
+    div[data-testid="stMetric"] {
+        background: linear-gradient(135deg, rgba(15,23,42,0.96) 0%, rgba(30,41,59,0.96) 100%);
+        border: 1px solid rgba(255,255,255,0.08);
+        padding: 0.85rem 0.95rem;
+        border-radius: 18px;
+        box-shadow: 0 16px 32px rgba(0,0,0,0.18);
+        transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        border-color: rgba(96,165,250,0.38);
+        box-shadow: 0 20px 36px rgba(0,0,0,0.24);
+    }
+    .hero-badge, .story-box, .sidebar-account-card, .sidebar-subscription-panel {
+        animation: floatFade .35s ease-out;
+    }
+    @keyframes floatFade {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: translateY(0); }
     }
     </style>
     """,
@@ -4034,6 +4132,7 @@ period = st.sidebar.selectbox(
     period_options,
     key="period",
     help=T["period_help"],
+    on_change=mark_period_user_override,
 )
 
 rebalance_freq = st.sidebar.selectbox(
@@ -4210,6 +4309,7 @@ if can_use_asset_search():
         T["asset_search_query"],
         key="asset_search_query",
         help=T["asset_search_query_help"],
+        placeholder="AAPL, Apple, US0378331005 ...",
     )
 
     filtered_assets = filter_asset_catalog(search_query)
@@ -4218,25 +4318,38 @@ if can_use_asset_search():
     else:
         filtered_assets = filtered_assets.copy()
         filtered_assets["display"] = filtered_assets.apply(lambda row: format_search_option(row, T), axis=1)
-        option_map = dict(zip(filtered_assets["display"], filtered_assets["ticker"]))
-        display_options = filtered_assets["display"].tolist()
-
-        selected_display = st.sidebar.selectbox(
+        selected_displays = st.sidebar.multiselect(
             T["asset_search_result"],
-            options=display_options,
+            options=filtered_assets["display"].tolist(),
+            default=filtered_assets["display"].tolist()[:1] if search_query.strip() else [],
             key="asset_search_select",
+            help=T["search_info"],
         )
 
-        if st.sidebar.button(T["add_asset_button"]):
-            ticker_to_add = option_map[selected_display]
-            add_ticker_to_basket(ticker_to_add)
-            save_active_basket_to_state()
-            save_logged_in_user_state()
-            st.sidebar.success(T["added_asset_msg"].format(ticker=ticker_to_add))
-            st.rerun()
+        for _, row in filtered_assets.iterrows():
+            result_cols = st.sidebar.columns([7, 1])
+            result_cols[0].markdown(
+                f"<div style='padding:.45rem .55rem;margin:.12rem 0;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);font-size:.82rem;line-height:1.35;'><b>{row['ticker']}</b><br><span style='opacity:.82'>{row['name']}</span><br><span style='opacity:.58'>ISIN: {row['isin']}</span></div>",
+                unsafe_allow_html=True,
+            )
+            if result_cols[1].button("＋", key=f"add_asset_quick_{row['ticker']}", use_container_width=True):
+                add_ticker_to_basket(row["ticker"])
+                save_active_basket_to_state()
+                save_logged_in_user_state()
+                st.sidebar.success(T["added_asset_msg"].format(ticker=row["ticker"]))
+                st.rerun()
 
-        if st.sidebar.button(T["add_selected_assets_button"]):
-            tickers_to_add = filtered_assets["ticker"].tolist()
+        add_cols = st.sidebar.columns(2)
+        if add_cols[0].button(T["add_asset_button"], use_container_width=True):
+            tickers_to_add = filtered_assets.loc[filtered_assets["display"].isin(selected_displays), "ticker"].tolist()
+            if tickers_to_add:
+                add_multiple_tickers_to_basket(tickers_to_add[:1])
+                save_active_basket_to_state()
+                save_logged_in_user_state()
+                st.sidebar.success(T["added_asset_msg"].format(ticker=tickers_to_add[0]))
+                st.rerun()
+        if add_cols[1].button(T["add_selected_assets_button"], use_container_width=True):
+            tickers_to_add = filtered_assets.loc[filtered_assets["display"].isin(selected_displays), "ticker"].tolist() or filtered_assets["ticker"].tolist()
             add_multiple_tickers_to_basket(tickers_to_add)
             save_active_basket_to_state()
             save_logged_in_user_state()
@@ -4277,6 +4390,8 @@ save_logged_in_user_state()
 
 input_tickers = [x.strip() for x in assets_input.splitlines() if x.strip()]
 asset_count = len(input_tickers)
+auto_adjust_period_for_large_baskets(asset_count, tier)
+period = st.session_state.get("period", period)
 max_assets = max(1, asset_count)
 current_top_n = int(st.session_state.get("top_n", 1))
 
@@ -4355,7 +4470,7 @@ if calculate_clicked:
             st.error(T["error_min_assets"])
             st.stop()
 
-        load_progress = st.progress(0, text="0%")
+        load_progress = st.progress(0, text=("Starte Berechnung …" if lang == "DE" else "Starting calculation …"))
         load_status = st.empty()
 
         series_map, skipped_tickers, partial_history_tickers = load_close_prices(
@@ -4370,6 +4485,7 @@ if calculate_clicked:
         for partial_ticker in partial_history_tickers:
             st.info(T["warning_partial_history"].format(ticker=partial_ticker))
 
+        load_progress.progress(0.35, text=("Bereinige Historie & Alignment …" if lang == "DE" else "Cleaning history & alignment …"))
         prices, dropped_after_align, alignment_info = align_price_series(series_map, period)
         if dropped_after_align:
             st.info(T["warning_align_reduced"])
@@ -4411,6 +4527,8 @@ if calculate_clicked:
             st.stop()
 
         try:
+            load_progress.progress(0.55, text=("Berechne Regime & Scores …" if lang == "DE" else "Computing regime & scores …"))
+            load_progress.progress(0.78, text=("Simuliere Portfolio & Steuern …" if lang == "DE" else "Simulating portfolio & taxes …"))
             context = simulate_allocato_v2(
                 prices=prices,
                 period=period,
@@ -4431,16 +4549,24 @@ if calculate_clicked:
                 soft_cash_invest_ratio_pct=int(soft_cash_invest_ratio_pct),
                 top_n=int(top_n),
                 simulate_taxes_de=bool(simulate_taxes_de),
+                benchmark_tickers=tuple(get_benchmark_list()),
+                weight_chart_top_n_value=int(weight_chart_top_n),
+                enable_ki_explanations_flag=bool(enable_ki_explanations),
+                use_regime_filter_flag=bool(use_regime_filter),
                 alignment_info=alignment_info,
             )
         except ValueError:
             st.error(T["error_too_few_rows"])
             st.stop()
 
+        load_progress.progress(0.93, text=("Stabilisiere Equity & bereite Anzeige vor …" if lang == "DE" else "Stabilizing equity & preparing visuals …"))
         context["skipped_tickers"] = skipped_tickers + [t for t in dropped_after_align if t not in skipped_tickers]
         context["latest_top_asset_explanations"] = build_latest_top_asset_explanations(context, lang)
         st.session_state["last_calc_results"] = context
+        load_progress.progress(1.0, text=("Fertig" if lang == "DE" else "Done"))
         render_calculation_results(context, T, lang, tier)
+        load_progress.empty()
+        load_status.empty()
         save_logged_in_user_state()
 
 elif st.session_state.get("last_calc_results") is not None:
