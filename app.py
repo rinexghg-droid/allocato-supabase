@@ -467,9 +467,14 @@ def render_pricing_card(plan: dict, idx: int):
                 if st.session_state.get(prompt_key, False):
                     st.warning(get_checkout_login_required_text())
                     st.caption(
-                        "💡 Keine Sorge: Ein kurzer Login, dann geht’s sofort weiter zum Checkout."
+                        "✨ Dein Upgrade ist schon warmgelaufen — ein kurzer Login, dann geht’s direkt weiter zum Checkout."
                         if st.session_state.get("lang", "DE") == "DE"
-                        else "💡 No worries: quick login first, then it’s straight back to checkout."
+                        else "✨ Your upgrade is already warmed up — quick login first, then it’s straight to checkout."
+                    )
+                    st.caption(
+                        "🔐 So landet wirklich alles sauber beim richtigen Allocato-Account."
+                        if st.session_state.get("lang", "DE") == "DE"
+                        else "🔐 That way everything lands neatly on the correct Allocato account."
                     )
                     if st.button(get_login_redirect_button_text(), key=f"login_redirect_{idx}", use_container_width=True):
                         st.switch_page("pages/1_Allocato.py")
@@ -513,6 +518,8 @@ st.markdown(
             header[data-testid="stHeader"]{background:transparent;}
             [data-testid="stToolbar"]{right:1rem;}
             [data-testid="stDecoration"]{display:none;}
+            [data-testid="stSidebar"]{display:none;}
+            [data-testid="collapsedControl"]{display:none;}
 
             .block-container{
                 max-width:1220px;
@@ -980,6 +987,25 @@ with hero_note_col:
         f"<div style='color:rgba(248,250,252,0.74);font-size:1rem;padding-top:.55rem;'>{t['hero_note']}</div>",
         unsafe_allow_html=True,
     )
+
+nav_col_a, nav_col_b = st.columns([3, 2], vertical_alignment="center")
+with nav_col_a:
+    st.markdown(
+        f"<div style='color:rgba(248,250,252,0.76);font-size:0.98rem;margin:.35rem 0 0.15rem 0;'>"
+        + ("🧭 Sauberer Flow: Landing Page für Überblick, Bot für Analyse, Upgrade nur mit Login."
+           if st.session_state.lang == "DE"
+           else "🧭 Clean flow: landing page for the overview, bot for analysis, upgrades only after login.")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+with nav_col_b:
+    if st.button(
+        "🤖 Direkt zum Bot" if st.session_state.lang == "DE" else "🤖 Jump to the Bot",
+        key="landing_to_bot_top",
+        use_container_width=True,
+        type="secondary",
+    ):
+        st.switch_page("pages/1_Allocato.py")
 
 st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
 section_header(t["why_label"], t["why_title"], t["why_text"])
