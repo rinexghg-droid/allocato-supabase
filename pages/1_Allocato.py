@@ -4343,35 +4343,65 @@ if can_use_asset_search():
         )
         st.session_state["asset_search_select"] = list(selected_displays)
 
+        # === MODERNER ASSET-SEARCH MIT + BUTTONS ===
         for _, row in filtered_assets.iterrows():
-            result_cols = st.sidebar.columns([7, 1])
-            result_cols[0].markdown(
-                f"<div style='padding:.45rem .55rem;margin:.12rem 0;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);font-size:.82rem;line-height:1.35;'><b>{row['ticker']}</b><br><span style='opacity:.82'>{row['name']}</span><br><span style='opacity:.58'>ISIN: {row['isin']}</span></div>",
-                unsafe_allow_html=True,
-            )
-            if result_cols[1].button("＋", key=f"add_asset_quick_{row['ticker']}", use_container_width=True):
-                add_ticker_to_basket(row["ticker"])
+            col1, col2 = st.sidebar.columns([6, 1], gap="small")
+
+            with col1:
+                st.markdown(
+                    f"""
+                    <div style="padding: 12px 14px; margin: 6px 0; border-radius: 14px;
+                                background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);">
+                        <b style="font-size: 0.95rem;">{row['ticker']}</b><br>
+                        <span style="opacity: 0.9; font-size: 0.88rem;">{row['name']}</span><br>
+                        <span style="opacity: 0.65; font-size: 0.78rem;">ISIN: {row['isin']}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            with col2:
+                if st.button(
+                    "＋",
+                    key=f"quick_add_{row['ticker']}",
+                    use_container_width=True,
+                    help=f"{row['ticker']} zum Korb hinzufügen" if lang == "DE" else f"Add {row['ticker']} to basket",
+                ):
+                    add_ticker_to_basket(row["ticker"])
+                    save_active_basket_to_state()
+                    save_logged_in_user_state()
+                    st.sidebar.success(f"✅ {row['ticker']} hinzugefügt" if lang == "DE" else f"✅ {row['ticker']} added")
+                    st.rerun()
+
+        # Schöne "Alle hinzufügen" Buttons
+        add_cols = st.sidebar.columns([1, 1], gap="small")
+        if add_cols[0].button(
+            "＋ Alle ausgewählten hinzufügen" if lang == "DE" else "＋ Add all selected",
+            use_container_width=True,
+            type="secondary",
+            key="add_selected_visible_assets_btn",
+        ):
+            selected_tickers = filtered_assets.loc[filtered_assets["display"].isin(selected_displays), "ticker"].tolist()
+            if selected_tickers:
+                add_multiple_tickers_to_basket(selected_tickers)
                 save_active_basket_to_state()
                 save_logged_in_user_state()
-                st.sidebar.success(T["added_asset_msg"].format(ticker=row["ticker"]))
+                st.sidebar.success(f"✅ {len(selected_tickers)} Assets hinzugefügt" if lang == "DE" else f"✅ Added {len(selected_tickers)} assets")
                 st.rerun()
 
-        add_cols = st.sidebar.columns(2)
-        if add_cols[0].button(T["add_asset_button"], use_container_width=True):
-            tickers_to_add = filtered_assets.loc[filtered_assets["display"].isin(selected_displays), "ticker"].tolist()
-            if tickers_to_add:
-                add_multiple_tickers_to_basket(tickers_to_add[:1])
+        if add_cols[1].button(
+            "Alle sichtbaren hinzufügen" if lang == "DE" else "Add all visible",
+            use_container_width=True,
+            type="primary",
+            key="add_all_visible_assets_btn",
+        ):
+            all_visible = filtered_assets["ticker"].tolist()
+            if all_visible:
+                add_multiple_tickers_to_basket(all_visible)
                 save_active_basket_to_state()
                 save_logged_in_user_state()
-                st.sidebar.success(T["added_asset_msg"].format(ticker=tickers_to_add[0]))
+                st.sidebar.success(f"✅ Alle {len(all_visible)} Assets hinzugefügt" if lang == "DE" else f"✅ Added all {len(all_visible)} assets")
                 st.rerun()
-        if add_cols[1].button(T["add_selected_assets_button"], use_container_width=True):
-            tickers_to_add = filtered_assets.loc[filtered_assets["display"].isin(selected_displays), "ticker"].tolist() or filtered_assets["ticker"].tolist()
-            add_multiple_tickers_to_basket(tickers_to_add)
-            save_active_basket_to_state()
-            save_logged_in_user_state()
-            st.sidebar.success(T["added_all_assets_msg"].format(count=len(tickers_to_add)))
-            st.rerun()
 
     st.sidebar.caption(T["search_info"])
 else:
