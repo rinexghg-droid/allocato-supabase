@@ -4087,6 +4087,13 @@ target_cash_floor_pct = st.sidebar.slider(
     help=T["cash_floor_help"],
 )
 
+
+if "soft_cash_invest_ratio_pct" in st.session_state:
+    try:
+        st.session_state["soft_cash_invest_ratio_pct"] = int(np.clip(int(st.session_state.get("soft_cash_invest_ratio_pct", 95)), 20, 100))
+    except Exception:
+        st.session_state["soft_cash_invest_ratio_pct"] = 95
+
 target_cash_ceiling_pct = st.sidebar.slider(
     T["cash_ceiling"],
     min_value=5,
@@ -4099,7 +4106,7 @@ target_cash_ceiling_pct = st.sidebar.slider(
 soft_cash_invest_ratio_pct = st.sidebar.slider(
     T["soft_cash_ratio"],
     min_value=20,
-    max_value=95,
+    max_value=100,
     step=5,
     key="soft_cash_invest_ratio_pct",
     help=T["soft_cash_ratio_help"],
