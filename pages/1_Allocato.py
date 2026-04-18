@@ -9,7 +9,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from supabase import create_client
 
 st.set_page_config(page_title="Allocato", layout="wide")
@@ -1457,51 +1457,163 @@ def save_active_basket_to_state():
     active = st.session_state.active_basket
     st.session_state.baskets[active] = st.session_state.get("assets_input", "")
 
-def load_close_prices(tickers, period):
-    series_map = {}
-    skipped = []
-    for t in tickers:
-        try:
-            raw = yf.download(t, period=period, progress=False, auto_adjust=False)
-        except Exception:
-            raw = pd.DataFrame()
-        if raw.empty:
-            skipped.append(t)
-            continue
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
-        if "Close" not in raw.columns:
-            skipped.append(t)
-            continue
-        s = pd.to_numeric(raw["Close"], errors="coerce").dropna().copy()
-        if s.empty:
-            skipped.append(t)
-            continue
-        s.name = t
-        series_map[t] = s
-    return series_map, skipped
 
-def align_price_series(series_map):
-    if not series_map:
-        return pd.DataFrame()
-    return pd.concat(series_map.values(), axis=1, join="inner").dropna()
+def get_period_metadata(period: str) -> dict:
+    period = str(period).strip().lower()
+    mapping = {
+        "1y": {"yf_period": "1y", "min_points": 180},
+        "2y": {"yf_period": "2y", "min_points": 300},
+        "3y": {"yf_period": "3y", "min_points": 420},
+        "5y": {"yf_period": "5y", "min_points": 700},
+        "10y": {"yf_period": "10y", "min_points": 1200},
+        "15y": {"yf_period": "15y", "min_points": 1800},
+        "20y": {"yf_period": "20y", "min_points": 2400},
+        "max": {"yf_period": "max", "min_points": 700},
+    }
+    return mapping.get(period, mapping["3y"])
 
-def load_single_close(ticker, period):
-    try:
-        raw = yf.download(ticker, period=period, progress=False, auto_adjust=False)
-    except Exception:
-        return pd.Series(dtype=float)
-    if raw.empty:
+def _extract_close_series(raw: pd.DataFrame, ticker: str) -> pd.Series:
+    if raw is None or raw.empty:
         return pd.Series(dtype=float)
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.get_level_values(0)
-    if "Close" not in raw.columns:
+    preferred_cols = ["Close", "Adj Close"]
+    close_col = next((col for col in preferred_cols if col in raw.columns), None)
+    if close_col is None:
         return pd.Series(dtype=float)
-    s = pd.to_numeric(raw["Close"], errors="coerce").dropna().copy()
+    s = pd.to_numeric(raw[close_col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().copy()
+    if s.empty:
+        return pd.Series(dtype=float)
+    s = s[~s.index.duplicated(keep="last")].sort_index()
     s.name = ticker
     return s
 
+def load_close_prices(tickers, period, progress_bar=None, status_box=None):
+    tickers = [str(t).strip() for t in tickers if str(t).strip()]
+    meta = get_period_metadata(period)
+    yf_period = meta["yf_period"]
+    min_points = meta["min_points"]
+
+    series_map = {}
+    skipped = []
+    insufficient = []
+    loaded = []
+
+    total = max(len(tickers), 1)
+    for i, t in enumerate(tickers, start=1):
+        if status_box is not None:
+            status_box.info(
+                f"📦 Lade {i}/{total}: {t}" if st.session_state.get("language", "DE") == "DE"
+                else f"📦 Loading {i}/{total}: {t}"
+            )
+        if progress_bar is not None:
+            progress_bar.progress(i / total, text=f"{i}/{total} • {t}")
+
+        try:
+            raw = yf.download(
+                t,
+                period=yf_period,
+                progress=False,
+                auto_adjust=True,
+                actions=False,
+                threads=False,
+            )
+        except Exception:
+            raw = pd.DataFrame()
+
+        s = _extract_close_series(raw, t)
+        if s.empty:
+            skipped.append(t)
+            continue
+
+        if len(s) < min_points:
+            insufficient.append(t)
+            continue
+
+        series_map[t] = s
+        loaded.append(t)
+
+    if progress_bar is not None:
+        progress_bar.empty()
+    if status_box is not None:
+        if loaded:
+            status_box.success(
+                f"✅ {len(loaded)} Assets geladen." if st.session_state.get("language", "DE") == "DE"
+                else f"✅ Loaded {len(loaded)} assets."
+            )
+        else:
+            status_box.warning(
+                "⚠️ Es konnten keine ausreichenden Kursdaten geladen werden."
+                if st.session_state.get("language", "DE") == "DE"
+                else "⚠️ No sufficient price history could be loaded."
+            )
+
+    return series_map, skipped, insufficient
+
+def align_price_series(series_map, min_non_na_ratio: float = 0.85):
+    if not series_map:
+        return pd.DataFrame(), []
+
+    prices = pd.concat(series_map.values(), axis=1, join="outer").sort_index()
+    prices = prices[~prices.index.duplicated(keep="last")]
+    prices = prices.replace([np.inf, -np.inf], np.nan)
+
+    valid_cols = []
+    dropped_cols = []
+
+    total_rows = len(prices.index)
+    for col in prices.columns:
+        s = prices[col].dropna()
+        if s.empty:
+            dropped_cols.append(col)
+            continue
+        coverage = len(s) / max(total_rows, 1)
+        if coverage < min_non_na_ratio:
+            dropped_cols.append(col)
+            continue
+        valid_cols.append(col)
+
+    if not valid_cols:
+        return pd.DataFrame(), list(prices.columns)
+
+    trimmed = prices[valid_cols].copy()
+
+    common_start = max(trimmed[col].first_valid_index() for col in trimmed.columns)
+    common_end = min(trimmed[col].last_valid_index() for col in trimmed.columns)
+    trimmed = trimmed.loc[common_start:common_end].copy()
+    trimmed = trimmed.ffill(limit=3).dropna(axis=0, how="any")
+
+    valid_final = []
+    dropped_final = dropped_cols[:]
+    for col in trimmed.columns:
+        s = trimmed[col].dropna()
+        if len(s) < 180:
+            dropped_final.append(col)
+        else:
+            valid_final.append(col)
+
+    if not valid_final:
+        return pd.DataFrame(), list(set(list(prices.columns) + dropped_final))
+
+    trimmed = trimmed[valid_final].copy()
+    return trimmed, sorted(set(dropped_final))
+
+def load_single_close(ticker, period):
+    try:
+        raw = yf.download(
+            ticker,
+            period=get_period_metadata(period)["yf_period"],
+            progress=False,
+            auto_adjust=True,
+            actions=False,
+            threads=False,
+        )
+    except Exception:
+        return pd.Series(dtype=float)
+    return _extract_close_series(raw, ticker)
+
 def compute_metrics(equity: pd.Series):
+
     returns = equity.pct_change().fillna(0)
     total_return = (equity.iloc[-1] / equity.iloc[0] - 1) * 100
     days = len(equity)
@@ -2092,7 +2204,7 @@ monthly_savings = st.sidebar.number_input(
 
 rebalance_options = T["rebalance_options"]
 
-period_options = ["1y", "2y", "3y"] if tier == "Free" else ["1y", "2y", "3y", "5y"]
+period_options = ["1y", "2y", "3y"] if tier == "Free" else ["1y", "2y", "3y", "5y", "10y", "15y", "20y", "max"]
 if st.session_state.period not in period_options:
     st.session_state.period = period_options[-1]
 
@@ -2366,11 +2478,38 @@ if st.sidebar.button(T["calculate"], type="primary"):
             st.error(T["error_min_assets"])
             st.stop()
 
-        series_map, skipped_tickers = load_close_prices(tickers, period)
+        load_progress = st.progress(0, text="0%")
+        load_status = st.empty()
+
+        series_map, skipped_tickers, insufficient_tickers = load_close_prices(
+            tickers,
+            period,
+            progress_bar=load_progress,
+            status_box=load_status,
+        )
+
         for skipped in skipped_tickers:
             st.warning(T["warning_skip"].format(ticker=skipped))
+        for skipped in insufficient_tickers:
+            st.warning(
+                (
+                    f"Zu wenig Historie für {skipped} – Asset wird automatisch entfernt."
+                    if lang == "DE"
+                    else f"Not enough history for {skipped} – asset removed automatically."
+                )
+            )
 
-        prices = align_price_series(series_map)
+        prices, dropped_after_align = align_price_series(series_map)
+        for skipped in dropped_after_align:
+            if skipped not in skipped_tickers and skipped not in insufficient_tickers:
+                st.warning(
+                    (
+                        f"{skipped} wurde wegen zu vieler Lücken oder zu kurzer gemeinsamer Historie entfernt."
+                        if lang == "DE"
+                        else f"{skipped} was removed because of too many gaps or too little common history."
+                    )
+                )
+
         if prices.empty:
             st.error(T["error_no_data"])
             st.stop()
@@ -2659,13 +2798,37 @@ if st.sidebar.button(T["calculate"], type="primary"):
         st.success(T["end_capital_success"].format(value=f"{equity_bot.iloc[-1]:,.2f} €"))
 
         # Equity chart
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(equity_bot.index, equity_bot, label=T["equity_label_bot"], linewidth=2.5, color="lime")
-        ax.plot(equity_bh.index, equity_bh, label=T["equity_label_bh"], linewidth=2.0, color="gray")
-        ax.set_title(T["equity_title"])
-        ax.legend()
-        ax.grid(True, alpha=0.25)
-        st.pyplot(fig)
+        equity_fig = go.Figure()
+        equity_fig.add_trace(
+            go.Scatter(
+                x=equity_bot.index,
+                y=equity_bot.values,
+                mode="lines",
+                name=T["equity_label_bot"],
+                line=dict(width=3),
+                hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_bot"] + "</extra>",
+            )
+        )
+        equity_fig.add_trace(
+            go.Scatter(
+                x=equity_bh.index,
+                y=equity_bh.values,
+                mode="lines",
+                name=T["equity_label_bh"],
+                line=dict(width=2, dash="dash"),
+                hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_bh"] + "</extra>",
+            )
+        )
+        equity_fig.update_layout(
+            title=T["equity_title"],
+            template="plotly_dark",
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            margin=dict(l=20, r=20, t=60, b=20),
+            xaxis_title="",
+            yaxis_title="€",
+        )
+        st.plotly_chart(equity_fig, use_container_width=True)
 
         # Export
         st.markdown(f"### {T['export_title']}")
@@ -2742,34 +2905,33 @@ if st.sidebar.button(T["calculate"], type="primary"):
         st.subheader(T["weights_chart_title"])
         st.caption(T["weights_chart_caption"])
 
-        chart_cols = list(weights_chart_df.columns)
-        base_colors = list(plt.cm.tab20.colors)
-        colors = []
-        normal_idx = 0
+        weights_plot_df = weights_chart_df.copy()
+        weights_fig = go.Figure()
 
-        for col in chart_cols:
-            if col == "Cash":
-                colors.append((0.50, 0.50, 0.50))
-            elif col == T["other_label"]:
-                colors.append((0.80, 0.80, 0.80))
-            else:
-                colors.append(base_colors[normal_idx % len(base_colors)])
-                normal_idx += 1
+        for col in weights_plot_df.columns:
+            weights_fig.add_trace(
+                go.Scatter(
+                    x=weights_plot_df.index,
+                    y=weights_plot_df[col],
+                    mode="lines",
+                    name=col,
+                    stackgroup="one",
+                    groupnorm="",
+                    hovertemplate="%{x|%Y-%m-%d}<br>" + col + ": %{y:.2f}%<extra></extra>",
+                )
+            )
 
-        fig2, ax2 = plt.subplots(figsize=(12, 6))
-        ax2.stackplot(
-            weights_chart_df.index,
-            *[weights_chart_df[col] for col in chart_cols],
-            labels=chart_cols,
-            colors=colors,
-            alpha=0.95,
+        weights_fig.update_layout(
+            title=T["weights_chart_inner_title"],
+            template="plotly_dark",
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            margin=dict(l=20, r=20, t=60, b=20),
+            xaxis_title="",
+            yaxis_title=T["weights_chart_ylabel"],
         )
-        ax2.set_title(T["weights_chart_inner_title"])
-        ax2.set_ylabel(T["weights_chart_ylabel"])
-        ax2.set_ylim(0, 100)
-        ax2.legend(loc="upper left", bbox_to_anchor=(1.01, 1))
-        ax2.grid(True, alpha=0.25)
-        st.pyplot(fig2)
+        weights_fig.update_yaxes(range=[0, 100], ticksuffix="%")
+        st.plotly_chart(weights_fig, use_container_width=True)
 
         with st.expander(T["latest_selection"]):
             if selected_assets_log:
