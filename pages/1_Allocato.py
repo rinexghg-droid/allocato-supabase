@@ -539,6 +539,7 @@ defaults = {
     "assets_input": "AAPL\nSAP.DE\nSIE.DE\nALV.DE\nMUV2.DE\nJNJ\nPG",
     "asset_search_query": "",
     "asset_search_select": None,
+    "benchmark_etfs_input": "SPY\nQQQ",
 }
 
 for k, v in defaults.items():
@@ -607,6 +608,7 @@ PERSISTENT_STATE_KEYS = [
     "assets_input",
     "asset_search_query",
     "asset_search_select",
+    "benchmark_etfs_input",
     "subscription_expires_at",
     "_pending_preset",
     "baskets",
@@ -1006,6 +1008,11 @@ TRANSLATIONS = {
         "warning_align_reduced": "Die gemeinsame Historie wurde automatisch bereinigt, damit der Vergleich stabil bleibt.",
         "metric_paid_in": "Kumulative Einzahlungen",
         "equity_label_paid_in": "Kumulative Einzahlungen",
+        "benchmark_section": "📊 Benchmark-ETFs hinzufügen",
+        "benchmark_input": "Benchmark-ETF Ticker (einer pro Zeile)",
+        "benchmark_input_help": "Beispiele: SPY, QQQ, VWCE.DE, URTH, IWDA.AS",
+        "benchmark_added_title": "Zusätzliche ETF-Benchmarks",
+        "buy_hold_action_col": "Buy & Hold Aktion",
         "annual_returns_title": "📅 Jährliche Renditen",
         "annual_returns_year": "Jahr",
         "annual_returns_bot": "Bot %",
@@ -1014,7 +1021,7 @@ TRANSLATIONS = {
         "rebal_sells_col": "Verkäufe",
         "rebal_reason_col": "Logik",
         "interpret_why_title": "Warum der Bot besser sein kann",
-        "interpret_why_text": "- **Cash-Management:** In schwächeren Marktphasen wird nicht stumpf immer voll investiert.\n- **Rebalancing-Logik:** Gewinner können nach festen Regeln neu gewichtet werden, statt ewig zufällig groß zu bleiben.\n- **Conviction-Weighting:** Stärkere Signale bekommen mehr Kapital, schwächere weniger.\n- **Trend-Filter:** Aktien unter ihrem Trend verlieren an Priorität.\n- **Verlustbegrenzung durch Auswahl:** Der Bot hält nicht automatisch den ganzen Korb gleichgewichtet wie Buy & Hold.",
+        "interpret_why_text": "- **Cash-Management:** In schwächeren Marktphasen wird nicht stumpf immer voll investiert.\n- **Rebalancing-Logik:** Gewinner können nach festen Regeln neu gewichtet werden, statt ewig zufällig groß zu bleiben.\n- **Conviction-Weighting:** Stärkere Signale bekommen mehr Kapital, schwächere weniger.\n- **Trend-Filter:** Aktien unter ihrem Trend verlieren an Priorität.\n- **Verlustbegrenzung durch Auswahl:** Der Bot hält nicht automatisch den ganzen Korb gleichgewichtet wie Buy & Hold.\n- **Buy & Hold investiert jeden Monat die Sparrate gleichmäßig auf alle verfügbaren Titel – daher bei großen Körben stark verdünnt.",
         "load_status_start": "Lade Kursdaten für {count} Assets ...",
         "load_status_done": "{loaded} Assets geladen • {partial} mit begrenzter Historie • {skipped} übersprungen.",
         "error_no_data": "Es konnten keine gültigen Kursdaten geladen werden.",
@@ -1294,6 +1301,11 @@ TRANSLATIONS = {
         "warning_align_reduced": "The common history was cleaned automatically to keep the comparison stable.",
         "metric_paid_in": "Cumulative contributions",
         "equity_label_paid_in": "Cumulative contributions",
+        "benchmark_section": "📊 Add benchmark ETFs",
+        "benchmark_input": "Benchmark ETF tickers (one per line)",
+        "benchmark_input_help": "Examples: SPY, QQQ, VWCE.DE, URTH, IWDA.AS",
+        "benchmark_added_title": "Additional ETF benchmarks",
+        "buy_hold_action_col": "Buy & Hold Action",
         "annual_returns_title": "📅 Annual returns",
         "annual_returns_year": "Year",
         "annual_returns_bot": "Bot %",
@@ -1302,7 +1314,7 @@ TRANSLATIONS = {
         "rebal_sells_col": "Sells",
         "rebal_reason_col": "Logic",
         "interpret_why_title": "Why the bot can outperform",
-        "interpret_why_text": "- **Cash management:** In weaker market phases, the bot does not blindly stay fully invested.\n- **Rebalancing logic:** Winners can be reweighted on clear rules instead of drifting forever.\n- **Conviction weighting:** Stronger signals get more capital, weaker signals get less.\n- **Trend filter:** Assets below trend lose priority.\n- **Selection effect:** The bot does not automatically hold the full basket equally weighted like Buy & Hold.",
+        "interpret_why_text": "- **Cash management:** In weaker market phases, the bot does not blindly stay fully invested.\n- **Rebalancing logic:** Winners can be reweighted on clear rules instead of drifting forever.\n- **Conviction weighting:** Stronger signals get more capital, weaker signals get less.\n- **Trend filter:** Assets below trend lose priority.\n- **Selection effect:** The bot does not automatically hold the full basket equally weighted like Buy & Hold.\n- **Buy & Hold invests the monthly savings evenly across all available names – therefore it gets heavily diluted in large baskets.",
         "load_status_start": "Loading price data for {count} assets ...",
         "load_status_done": "{loaded} assets loaded • {partial} with limited history • {skipped} skipped.",
         "error_no_data": "No valid price data could be loaded.",
@@ -1490,6 +1502,43 @@ def sync_active_basket_from_state():
 def save_active_basket_to_state():
     active = st.session_state.active_basket
     st.session_state.baskets[active] = st.session_state.get("assets_input", "")
+
+
+def get_benchmark_list() -> list[str]:
+    raw = st.session_state.get("benchmark_etfs_input", "")
+    cleaned = []
+    seen = set()
+    for item in raw.splitlines():
+        ticker = str(item).strip().upper()
+        if ticker and ticker not in seen:
+            cleaned.append(ticker)
+            seen.add(ticker)
+    return cleaned
+
+def build_benchmark_equity_series(benchmark_tickers: list[str], period: str, dates: pd.Index, initial_capital: float, monthly_savings: float) -> dict:
+    benchmark_map = {}
+    for bench in benchmark_tickers:
+        series = _download_with_fallbacks(bench, get_period_metadata(period)["yf_period"])
+        if series.empty:
+            continue
+        series = series.reindex(dates).ffill().dropna()
+        if len(series) < 30:
+            continue
+        bench_dates = series.index
+        first_price = float(series.iloc[0])
+        if first_price <= 0:
+            continue
+        shares = initial_capital / first_price
+        equity = pd.Series(index=bench_dates, dtype=float)
+        for i, date in enumerate(bench_dates):
+            price = float(series.loc[date])
+            if i > 0:
+                prev_date = bench_dates[i - 1]
+                if date.month != prev_date.month or date.year != prev_date.year:
+                    shares += monthly_savings / price
+            equity.loc[date] = shares * price
+        benchmark_map[bench] = equity.reindex(dates).ffill()
+    return benchmark_map
 
 
 
@@ -1788,7 +1837,13 @@ def style_rebalance_log(df: pd.DataFrame, buys_col: str, sells_col: str):
         border = "#22c55e" if positive else "#ef4444"
         color = "#dcfce7" if positive else "#fee2e2"
         return f"background-color: {bg}; color: {color}; border-left: 3px solid {border};"
-    return df.style.applymap(lambda v: _cell_color(v, True), subset=[buys_col]).applymap(lambda v: _cell_color(v, False), subset=[sells_col])
+
+    styler = df.style
+    if buys_col in df.columns:
+        styler = styler.map(lambda v: _cell_color(v, True), subset=[buys_col])
+    if sells_col in df.columns:
+        styler = styler.map(lambda v: _cell_color(v, False), subset=[sells_col])
+    return styler
 
 def render_calculation_results(context, T, lang, tier):
     bot_metrics = context["bot_metrics"]
@@ -1823,6 +1878,7 @@ def render_calculation_results(context, T, lang, tier):
     prices = context["prices"]
     raw_score = context["raw_score"]
     annual_returns_df = compute_annual_returns(equity_bot, equity_bh, T)
+    benchmark_equities = context.get("benchmark_equities", {})
 
     # Status
     if outperformance_pp > 0:
@@ -1893,6 +1949,18 @@ def render_calculation_results(context, T, lang, tier):
             hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + T["equity_label_bh"] + "</extra>",
         )
     )
+    for bench_name, bench_equity in benchmark_equities.items():
+        equity_fig.add_trace(
+            go.Scatter(
+                x=bench_equity.index,
+                y=bench_equity.values,
+                mode="lines",
+                name=bench_name,
+                line=dict(width=1.4),
+                opacity=0.9,
+                hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} €<extra>" + bench_name + "</extra>",
+            )
+        )
     equity_fig.add_trace(
         go.Scatter(
             x=cumulative_contributions.index,
@@ -1913,6 +1981,8 @@ def render_calculation_results(context, T, lang, tier):
         yaxis_title="€",
     )
     st.plotly_chart(equity_fig, use_container_width=True)
+    if benchmark_equities:
+        st.caption((T["benchmark_added_title"] + ": " + ", ".join(benchmark_equities.keys())))
     
     # Export
     st.markdown(f"### {T['export_title']}")
@@ -2068,6 +2138,7 @@ def render_calculation_results(context, T, lang, tier):
                 T["date_col"],
                 T["regime_ok_col"],
                 T["selected_assets_col"],
+                T["buy_hold_action_col"],
                 T["rebal_buys_col"],
                 T["rebal_sells_col"],
                 T["rebal_reason_col"],
@@ -2845,6 +2916,14 @@ else:
     )
     st.sidebar.caption("⚠️ Bitte mindestens 2 Assets im Korb lassen." if lang == "DE" else "⚠️ Please keep at least 2 assets in the basket.")
 
+st.sidebar.subheader(T["benchmark_section"])
+st.sidebar.text_area(
+    T["benchmark_input"],
+    key="benchmark_etfs_input",
+    height=90,
+    help=T["benchmark_input_help"],
+)
+
 # =========================
 # Explainers
 # =========================
@@ -3084,10 +3163,20 @@ if calculate_clicked:
                 else:
                     rebalance_reason = "Cash / keine starken Signale" if lang == "DE" else "Cash / no strong signals"
 
+                bh_monthly_action = "—"
+                if i > 0 and date.month != prev_date.month:
+                    per_asset_bh = monthly_savings / max(len(tickers), 1)
+                    bh_monthly_action = (
+                        f"{monthly_savings:,.0f}€ gleichmäßig auf {len(tickers)} Titel ({per_asset_bh:,.2f}€ je Titel)"
+                        if lang == "DE"
+                        else f"{monthly_savings:,.0f}€ spread evenly across {len(tickers)} names ({per_asset_bh:,.2f}€ each)"
+                    )
+
                 rebalance_log.append({
                     T["date_col"]: date,
                     T["regime_ok_col"]: regime_today_ok,
                     T["selected_assets_col"]: ", ".join(selected_assets_log.get(date, [])) if selected_assets_log.get(date, []) else "Cash",
+                    T["buy_hold_action_col"]: bh_monthly_action,
                     T["rebal_buys_col"]: ", ".join(buy_actions) if buy_actions else "—",
                     T["rebal_sells_col"]: ", ".join(sell_actions) if sell_actions else "—",
                     T["rebal_reason_col"]: rebalance_reason,
@@ -3169,6 +3258,14 @@ if calculate_clicked:
             weights_with_cash.index.intersection(rebalance_dates)
         ].copy()
 
+        benchmark_equities = build_benchmark_equity_series(
+            get_benchmark_list(),
+            period,
+            dates,
+            float(initial_capital),
+            float(monthly_savings),
+        )
+
         context = {
             "bot_metrics": bot_metrics,
             "bh_metrics": bh_metrics,
@@ -3201,6 +3298,7 @@ if calculate_clicked:
             "use_regime_filter": use_regime_filter,
             "prices": prices,
             "raw_score": raw_score,
+            "benchmark_equities": benchmark_equities,
         }
         st.session_state["last_calc_results"] = context
         render_calculation_results(context, T, lang, tier)
