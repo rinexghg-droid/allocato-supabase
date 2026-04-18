@@ -1052,6 +1052,11 @@ TRANSLATIONS = {
         "metric_dd": "Bot Max Drawdown",
         "metric_vol": "Bot Volatilität",
         "metric_sharpe": "Bot Sharpe",
+        "metric_net_bot": "Netto nach Steuern (Bot)",
+        "metric_net_bh": "Netto nach Steuern (Buy & Hold)",
+        "tax_gross_net_text": "- **Brutto vs. Netto:** Ohne Steuern wirkt aktive Umschichtung oft zu stark. Sobald reale Steuerabflüsse auf realisierte Gewinne berücksichtigt werden, sinkt der frei verfügbare Cash-Puffer des Bots.
+- **Warum Buy & Hold meist näher an Brutto bleibt:** Buy & Hold verkauft in dieser Simulation fast nichts. Dadurch werden Gewinne meist nicht laufend versteuert, sondern bleiben investiert.
+- **Warum der Bot trotzdem vorn bleiben kann:** Der Bot versucht trotz Steuerabzügen, durch Selektion, Cash-Management und Rebalancing effizientere Kapitalpfade zu finden.",
         "end_capital_success": "Endkapital dynamischer Bot: {value}",
         "equity_title": "Dynamischer Portfolio Bot vs Buy & Hold",
         "equity_label_bot": "Dynamischer Bot",
@@ -1350,6 +1355,11 @@ TRANSLATIONS = {
         "metric_dd": "Bot max drawdown",
         "metric_vol": "Bot volatility",
         "metric_sharpe": "Bot Sharpe",
+        "metric_net_bot": "Net after taxes (Bot)",
+        "metric_net_bh": "Net after taxes (Buy & Hold)",
+        "tax_gross_net_text": "- **Gross vs. net:** Without taxes, active rebalancing can look too strong. Once real tax drag on realized gains is included, the bot loses part of its free cash buffer.
+- **Why Buy & Hold often stays closer to gross:** Buy & Hold rarely sells in this simulation. Gains therefore remain mostly untaxed during the run and continue compounding.
+- **Why the bot can still stay ahead:** Even after taxes, the bot may still benefit from selection, cash management and rebalancing discipline.",
         "end_capital_success": "Ending capital dynamic bot: {value}",
         "equity_title": "Dynamic portfolio bot vs Buy & Hold",
         "equity_label_bot": "Dynamic bot",
@@ -1909,6 +1919,22 @@ def style_rebalance_log(df: pd.DataFrame, buys_col: str, sells_col: str):
         styler = styler.map(lambda v: _cell_color(v, False), subset=[sells_col])
     return styler
 
+def render_net_tax_badge(label: str, value: float, paid_in: float):
+    positive = value >= paid_in
+    bg = "rgba(34,197,94,0.14)" if positive else "rgba(239,68,68,0.14)"
+    border = "rgba(34,197,94,0.40)" if positive else "rgba(239,68,68,0.40)"
+    color = "#dcfce7" if positive else "#fecaca"
+    st.markdown(
+        f"""
+        <div style="padding:0.95rem 1rem;border-radius:16px;background:{bg};border:1px solid {border};margin:.15rem 0 .4rem 0;">
+            <div style="font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;font-weight:800;color:rgba(248,250,252,.72);">{label}</div>
+            <div style="font-size:1.35rem;font-weight:800;color:{color};margin-top:.15rem;">{value:,.2f} €</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_calculation_results(context, T, lang, tier):
     bot_metrics = context["bot_metrics"]
     bh_metrics = context["bh_metrics"]
@@ -1982,6 +2008,11 @@ def render_calculation_results(context, T, lang, tier):
     
     st.success(T["end_capital_success"].format(value=f"{equity_bot.iloc[-1]:,.2f} €"))
     if simulate_taxes_de:
+        net_col_1, net_col_2 = st.columns(2)
+        with net_col_1:
+            render_net_tax_badge(T["metric_net_bot"], float(equity_bot.iloc[-1]), float(cumulative_contributions.iloc[-1]))
+        with net_col_2:
+            render_net_tax_badge(T["metric_net_bh"], float(equity_bh.iloc[-1]), float(cumulative_contributions.iloc[-1]))
         st.caption(f"🇩🇪 {T['taxes_col']}: Bot {bot_taxes_paid:,.2f} € | Buy & Hold {bh_taxes_paid:,.2f} €")
     st.markdown(
         f"""
@@ -2121,6 +2152,7 @@ def render_calculation_results(context, T, lang, tier):
         if simulate_taxes_de:
             st.markdown(f"### {T['tax_note_title']}")
             st.markdown(T["tax_note_text"])
+            st.markdown(T["tax_gross_net_text"])
     
     with st.expander(T["annual_returns_title"], expanded=True):
         if not annual_returns_df.empty:
@@ -3327,35 +3359,21 @@ if calculate_clicked:
             if bh_tax_state["year"] != current_year:
                 bh_tax_state["year"] = current_year
                 bh_tax_state["used_allowance"] = 0.0
+
             if i > 0:
                 prev_date = dates[i - 1]
                 if date.month != prev_date.month:
                     for tkr in tickers:
-                        add_shares = (monthly_savings * bh_weight) / current_prices[tkr]
+                        price_now = float(current_prices[tkr])
+                        if price_now <= 0:
+                            continue
+                        add_shares = (monthly_savings * bh_weight) / price_now
                         bh_shares[tkr] += add_shares
                         bh_lots_state[tkr]["shares"] += add_shares
-                        bh_lots_state[tkr]["cost_total"] += add_shares * float(current_prices[tkr])
+                        bh_lots_state[tkr]["cost_total"] += add_shares * price_now
 
-            if i == len(dates) - 1 and simulate_taxes_de:
-                bh_tax_due_total = 0.0
-                for tkr in tickers:
-                    updated_shares, _, tax_due = apply_trade_with_tax(
-                        ticker=tkr,
-                        current_shares=bh_shares[tkr],
-                        target_shares=0.0,
-                        price=float(current_prices[tkr]),
-                        lots_state=bh_lots_state,
-                        taxes_enabled=True,
-                        tax_state=bh_tax_state,
-                        tax_rate=tax_rate,
-                    )
-                    bh_tax_due_total += tax_due
-                    bh_shares[tkr] = updated_shares
-                bh_tax_state["taxes_paid_total"] += bh_tax_due_total
-                bh_cash -= bh_tax_due_total
-
-            bh_value = sum(bh_shares[tkr] * current_prices[tkr] for tkr in tickers) + bh_cash
-            equity_bh.loc[date] = bh_value
+            bh_value = sum(max(0.0, bh_shares[tkr]) * float(current_prices[tkr]) for tkr in tickers) + max(0.0, bh_cash)
+            equity_bh.loc[date] = max(0.0, bh_value)
 
         bot_metrics = compute_metrics(equity_bot)
         bh_metrics = compute_metrics(equity_bh)
