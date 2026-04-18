@@ -225,6 +225,69 @@ def logout_user():
     st.session_state["auth_is_admin"] = False
     st.session_state["subscription_tier"] = "Free"
 
+def update_user_password(email: str, current_password: str, new_password: str) -> tuple[bool, str]:
+    normalized = normalize_email(email)
+    if len(new_password) < 8:
+        return False, "Das neue Passwort muss mindestens 8 Zeichen lang sein."
+    try:
+        row = get_user_row(normalized)
+    except Exception as e:
+        return False, f"Passwort-Update fehlgeschlagen: {e}"
+    if row is None:
+        return False, "Kein Konto mit dieser E-Mail gefunden."
+    if not verify_password(current_password, row["password_hash"]):
+        return False, "Das aktuelle Passwort ist nicht korrekt."
+    try:
+        now = datetime.utcnow().isoformat()
+        supabase = get_supabase_client()
+        supabase.table("users").update({
+            "password_hash": hash_password(new_password),
+            "updated_at": now,
+        }).eq("email", normalized).execute()
+        return True, "✨ Passwort erfolgreich aktualisiert."
+    except Exception as e:
+        return False, f"Passwort-Update fehlgeschlagen: {e}"
+
+def update_user_email(current_email: str, password: str, new_email: str) -> tuple[bool, str]:
+    normalized_current = normalize_email(current_email)
+    normalized_new = normalize_email(new_email)
+
+    if normalized_current == normalized_new:
+        return False, "Die neue E-Mail ist identisch mit der aktuellen."
+    if not is_valid_email(normalized_new):
+        return False, "Bitte eine gültige neue E-Mail-Adresse eingeben."
+
+    try:
+        current_row = get_user_row(normalized_current)
+    except Exception as e:
+        return False, f"E-Mail-Update fehlgeschlagen: {e}"
+
+    if current_row is None:
+        return False, "Kein Konto mit dieser E-Mail gefunden."
+    if not verify_password(password, current_row["password_hash"]):
+        return False, "Das Passwort ist nicht korrekt."
+
+    try:
+        existing_target = get_user_row(normalized_new)
+        if existing_target:
+            return False, "Diese neue E-Mail ist bereits registriert."
+    except Exception as e:
+        return False, f"E-Mail-Update fehlgeschlagen: {e}"
+
+    try:
+        now = datetime.utcnow().isoformat()
+        supabase = get_supabase_client()
+        supabase.table("users").update({
+            "email": normalized_new,
+            "updated_at": now,
+        }).eq("email", normalized_current).execute()
+        st.session_state["auth_user_email"] = normalized_new
+        st.session_state["auth_loaded_for"] = ""
+        st.session_state["auth_is_admin"] = normalized_new in ADMIN_EMAILS
+        return True, "✨ E-Mail erfolgreich aktualisiert."
+    except Exception as e:
+        return False, f"E-Mail-Update fehlgeschlagen: {e}"
+
 def get_auth_texts(lang: str) -> dict:
     if lang == "EN":
         return {
@@ -241,6 +304,25 @@ def get_auth_texts(lang: str) -> dict:
             "logged_in_as": "Logged in as",
             "current_plan": "Current plan",
             "plan_note": "Your plan is loaded from your account.",
+            "account_magic_title": "✨ Your Allocato cockpit",
+            "account_guest_title": "🌟 Ready for your account?",
+            "upgrade_title": "🚀 Upgrade your setup",
+            "upgrade_hint": "Choose your pace — Basic, Pro or Lifetime.",
+            "password_change_title": "🔐 Change password",
+            "password_current": "Current password",
+            "password_new": "New password",
+            "password_new_repeat": "Repeat new password",
+            "password_change_button": "Save new password",
+            "password_change_mismatch": "The new passwords do not match.",
+            "email_change_title": "📬 Change email",
+            "email_new": "New email address",
+            "email_change_button": "Save new email",
+            "security_note": "Your account area is where plan, login and security stay in sync.",
+            "login_gate_caption": "Log in once and your upgrade will be attached to the right account instantly.",
+            "plan_free_badge": "🆓 Free mode",
+            "plan_basic_badge": "📘 Basic active",
+            "plan_pro_badge": "🚀 Pro active",
+            "plan_lifetime_badge": "💎 Lifetime active",
             "admin_plan": "Admin plan control",
             "save_plan": "Save plan",
             "plan_saved": "Plan saved.",
@@ -262,6 +344,25 @@ def get_auth_texts(lang: str) -> dict:
         "logged_in_as": "Eingeloggt als",
         "current_plan": "Aktueller Plan",
         "plan_note": "Dein Plan wird aus deinem Nutzerkonto geladen.",
+        "account_magic_title": "✨ Dein Allocato-Cockpit",
+        "account_guest_title": "🌟 Bereit für deinen Account?",
+        "upgrade_title": "🚀 Upgrade dein Setup",
+        "upgrade_hint": "Wähle dein Tempo — Basic, Pro oder Lifetime.",
+        "password_change_title": "🔐 Passwort ändern",
+        "password_current": "Aktuelles Passwort",
+        "password_new": "Neues Passwort",
+        "password_new_repeat": "Neues Passwort wiederholen",
+        "password_change_button": "Neues Passwort speichern",
+        "password_change_mismatch": "Die neuen Passwörter stimmen nicht überein.",
+        "email_change_title": "📬 E-Mail ändern",
+        "email_new": "Neue E-Mail-Adresse",
+        "email_change_button": "Neue E-Mail speichern",
+        "security_note": "Hier bleiben Plan, Login und Sicherheit sauber auf einer Spur.",
+        "login_gate_caption": "Einmal kurz einloggen — dann hängt sich dein Upgrade direkt an den richtigen Account.",
+        "plan_free_badge": "🆓 Free-Modus",
+        "plan_basic_badge": "📘 Basic aktiv",
+        "plan_pro_badge": "🚀 Pro aktiv",
+        "plan_lifetime_badge": "💎 Lifetime aktiv",
         "admin_plan": "Admin-Plansteuerung",
         "save_plan": "Plan speichern",
         "plan_saved": "Plan gespeichert.",
@@ -1462,6 +1563,45 @@ st.markdown(
         opacity: 0.7;
         margin-bottom: 0.4rem;
     }
+    .sidebar-account-card {
+        background: linear-gradient(135deg, rgba(15,23,42,0.96) 0%, rgba(30,41,59,0.96) 100%);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 18px;
+        padding: 0.95rem 1rem;
+        margin-bottom: 0.8rem;
+        color: rgba(255,255,255,0.95);
+        box-shadow: 0 14px 28px rgba(0,0,0,0.18);
+    }
+    .sidebar-account-kicker {
+        font-size: 0.74rem;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: rgba(147,197,253,0.92);
+        margin-bottom: 0.35rem;
+        font-weight: 800;
+    }
+    .sidebar-account-title {
+        font-size: 1.05rem;
+        font-weight: 800;
+        margin-bottom: 0.25rem;
+        color: #f8fafc;
+    }
+    .sidebar-account-text {
+        font-size: 0.92rem;
+        line-height: 1.5;
+        color: rgba(248,250,252,0.80);
+    }
+    .sidebar-plan-badge {
+        display: inline-block;
+        padding: 0.42rem 0.72rem;
+        border-radius: 999px;
+        font-size: 0.84rem;
+        font-weight: 800;
+        margin-top: 0.45rem;
+        background: rgba(34,197,94,0.16);
+        border: 1px solid rgba(34,197,94,0.30);
+        color: #ecfccb;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1512,14 +1652,50 @@ AUTH_T = get_auth_texts(lang)
 
 st.sidebar.header(AUTH_T["account_header"])
 
+tier = get_current_tier()
+override_tier = get_test_override_tier(st.session_state.get("auth_user_email", ""))
+
+plan_badge_map = {
+    "Free": AUTH_T["plan_free_badge"],
+    "Basic": AUTH_T["plan_basic_badge"],
+    "Pro": AUTH_T["plan_pro_badge"],
+    "Lifetime": AUTH_T["plan_lifetime_badge"],
+}
+plan_state_text_map = {
+    "Free": T["free_warning"],
+    "Basic": T["basic_active"],
+    "Pro": T["pro_active"],
+    "Lifetime": T["lifetime_active"],
+}
+
 if st.session_state.get("auth_logged_in"):
-    st.sidebar.success(f'{AUTH_T["logged_in_as"]}: {st.session_state["auth_user_email"]}')
+    st.sidebar.markdown(
+        f"""
+        <div class="sidebar-account-card">
+            <div class="sidebar-account-kicker">{AUTH_T["account_magic_title"]}</div>
+            <div class="sidebar-account-title">{AUTH_T["logged_in_as"]}</div>
+            <div class="sidebar-account-text">{st.session_state["auth_user_email"]}</div>
+            <div class="sidebar-plan-badge">{TIER_ICONS.get(tier, "🔑")} {plan_badge_map.get(tier, tier)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.sidebar.caption(AUTH_T["plan_note"])
-    if st.sidebar.button(AUTH_T["logout_button"], use_container_width=True):
-        logout_user()
-        st.rerun()
+    st.sidebar.info(plan_state_text_map.get(tier, tier))
+    if override_tier:
+        st.sidebar.caption(f"🧪 Test-Override aktiv: {override_tier} für {st.session_state.get('auth_user_email', '')}")
 else:
-    st.sidebar.info(AUTH_T["guest_info"])
+    st.sidebar.markdown(
+        f"""
+        <div class="sidebar-account-card">
+            <div class="sidebar-account-kicker">{AUTH_T["account_guest_title"]}</div>
+            <div class="sidebar-account-title">{AUTH_T["guest_info"]}</div>
+            <div class="sidebar-account-text">{AUTH_T["security_note"]}</div>
+            <div class="sidebar-plan-badge">{TIER_ICONS.get("Free", "🆓")} {plan_badge_map.get("Free", "Free")}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     login_tab, register_tab = st.sidebar.tabs([AUTH_T["login_tab"], AUTH_T["register_tab"]])
 
     with login_tab:
@@ -1552,22 +1728,8 @@ else:
                 else:
                     st.sidebar.error(message)
 
-st.sidebar.header(T["subscription_header"])
-tier = get_current_tier()
-stored_tier = st.session_state.get("subscription_tier", "Free")
-st.sidebar.markdown(f'**{AUTH_T["current_plan"]}:** {TIER_ICONS.get(tier, "🔑")} {tier}')
-override_tier = get_test_override_tier(st.session_state.get("auth_user_email", ""))
-if override_tier and st.session_state.get("auth_logged_in"):
-    st.sidebar.caption(f"🧪 Test-Override aktiv: {override_tier} für {st.session_state.get('auth_user_email', '')}")
-
-if tier == "Free":
-    st.sidebar.warning(T["free_warning"])
-elif tier == "Basic":
-    st.sidebar.info(T["basic_active"])
-elif tier == "Pro":
-    st.sidebar.success(T["pro_active"])
-else:
-    st.sidebar.success(T["lifetime_active"])
+st.sidebar.subheader(AUTH_T["upgrade_title"])
+st.sidebar.caption(AUTH_T["upgrade_hint"])
 
 upgrade_col_1, upgrade_col_2, upgrade_col_3 = st.sidebar.columns(3)
 
@@ -1600,11 +1762,48 @@ if (not st.session_state.get("auth_logged_in", False)) and st.session_state.get(
         if lang == "DE"
         else f"✨ {chosen_plan} is already waiting for you — quick login first, then it’s straight to checkout."
     )
+    st.sidebar.caption(AUTH_T["login_gate_caption"])
     if st.sidebar.button(get_login_redirect_button_text(lang), key="sidebar_login_redirect", use_container_width=True):
         st.switch_page("pages/1_Allocato.py")
 
 st.sidebar.caption(AUTH_T["stripe_note"])
 
+if st.session_state.get("auth_logged_in"):
+    with st.sidebar.expander(AUTH_T["password_change_title"], expanded=False):
+        with st.form("change_password_form", clear_on_submit=False):
+            current_pw = st.text_input(AUTH_T["password_current"], type="password", key="current_password_input")
+            new_pw = st.text_input(AUTH_T["password_new"], type="password", key="new_password_input")
+            new_pw_repeat = st.text_input(AUTH_T["password_new_repeat"], type="password", key="new_password_repeat_input")
+            pw_submit = st.form_submit_button(AUTH_T["password_change_button"], use_container_width=True)
+        if pw_submit:
+            if new_pw != new_pw_repeat:
+                st.sidebar.error(AUTH_T["password_change_mismatch"])
+            else:
+                ok, message = update_user_password(st.session_state["auth_user_email"], current_pw, new_pw)
+                if ok:
+                    st.sidebar.success(message)
+                else:
+                    st.sidebar.error(message)
+
+    with st.sidebar.expander(AUTH_T["email_change_title"], expanded=False):
+        with st.form("change_email_form", clear_on_submit=False):
+            new_email_value = st.text_input(AUTH_T["email_new"], key="new_email_input")
+            email_password = st.text_input(AUTH_T["password"], type="password", key="change_email_password_input")
+            email_submit = st.form_submit_button(AUTH_T["email_change_button"], use_container_width=True)
+        if email_submit:
+            ok, message = update_user_email(st.session_state["auth_user_email"], email_password, new_email_value)
+            if ok:
+                st.sidebar.success(message)
+                st.rerun()
+            else:
+                st.sidebar.error(message)
+
+    if st.sidebar.button(AUTH_T["logout_button"], use_container_width=True):
+        logout_user()
+        st.rerun()
+
+st.sidebar.header(T["subscription_header"])
+st.sidebar.markdown(f'**{AUTH_T["current_plan"]}:** {TIER_ICONS.get(tier, "🔑")} {tier}')
 if st.session_state.get("auth_logged_in") and st.session_state.get("auth_is_admin") and ALLOW_ADMIN_TIER_OVERRIDE:
     st.sidebar.subheader(AUTH_T["admin_plan"])
     admin_selected_tier = st.sidebar.selectbox(
