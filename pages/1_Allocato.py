@@ -525,18 +525,18 @@ defaults = {
     "rebalance_freq": "Monatlich",
     "fee_pct_input": 0.10,
     "min_score": 0.00,
-    "max_weight_pct": 55,
+    "max_weight_pct": 40,
     "vol_penalty": 0.08,
     "cash_interest_pct": 0.00,
     "use_regime_filter": False,
     "show_debug": False,
     "conviction_power": 2.0,
     "soft_cash_mode": True,
-    "target_cash_floor_pct": 5,
-    "target_cash_ceiling_pct": 15,
-    "soft_cash_invest_ratio_pct": 85,
+    "target_cash_floor_pct": 1,
+    "target_cash_ceiling_pct": 8,
+    "soft_cash_invest_ratio_pct": 95,
     "weight_chart_top_n": 8,
-    "top_n": 4,
+    "top_n": 8,
     "assets_input": "AAPL\nSAP.DE\nSIE.DE\nALV.DE\nMUV2.DE\nJNJ\nPG",
     "asset_search_query": "",
     "asset_search_select": None,
@@ -1020,9 +1020,9 @@ TRANSLATIONS = {
         "simulate_taxes_de": "Steuern DE simulieren (26,375 %)",
         "simulate_taxes_de_help": "Simuliert Abgeltungsteuer auf realisierte Gewinne mit 1.000 € Freistellungsbetrag pro Jahr und Average-Cost-Methode.",
         "enable_ki_explanations": "KI-Erklärungen aktivieren",
-        "enable_ki_explanations_help": "Nutzen Grok über die xAI API für kurze Erklärungen zu den zuletzt ausgewählten Top-Assets.",
+        "enable_ki_explanations_help": "Zeigt kurze Dummy-Erklärungen zu den zuletzt ausgewählten Top-Assets an.",
         "ki_explanations_title": "🤖 KI-Erklärungen zu den Top-Assets",
-        "ki_explanations_missing_key": "GROK_API_KEY fehlt in st.secrets – es wird die lokale Fallback-Erklärung genutzt.",
+        "ki_explanations_missing_key": "Es werden lokale Dummy-Erklärungen verwendet – keine API-Kosten.",
         "taxes_col": "Steuern €",
         "tax_note_title": "Steuern & Realismus",
         "tax_note_text": "- Aktivierte Steuern belasten realisierte Gewinne des Bots sofort über Cash.\n- Verwendet wird die Average-Cost-Methode für Einstandspreise.\n- Pro Kalenderjahr werden automatisch 1.000 € Freistellungsbetrag berücksichtigt.\n- Buy & Hold realisiert in dieser Simulation kaum Gewinne, weil Positionen fast nie verkauft werden. Dadurch wird der Vergleich realistischer und der Bot weniger künstlich bevorzugt.",
@@ -1327,9 +1327,9 @@ TRANSLATIONS = {
         "simulate_taxes_de": "Simulate German taxes (26.375%)",
         "simulate_taxes_de_help": "Simulates capital gains tax on realized profits with a €1,000 annual allowance and average-cost accounting.",
         "enable_ki_explanations": "Enable AI explanations",
-        "enable_ki_explanations_help": "Use Grok via the xAI API for short explanations of the most recently selected top assets.",
+        "enable_ki_explanations_help": "Show short local placeholder explanations for the most recently selected top assets.",
         "ki_explanations_title": "🤖 AI explanations for the top assets",
-        "ki_explanations_missing_key": "GROK_API_KEY is missing in st.secrets – using the local fallback explanation instead.",
+        "ki_explanations_missing_key": "Local placeholder explanations are used – no API cost.",
         "taxes_col": "Taxes €",
         "tax_note_title": "Taxes & realism",
         "tax_note_text": "- Enabled taxes reduce bot cash immediately when gains are realized.\n- The simulation uses an average-cost basis.\n- A €1,000 yearly allowance is applied automatically.\n- Buy & Hold realizes very few gains in this setup because positions are rarely sold. That makes the comparison more realistic and prevents an artificial bot advantage.",
@@ -1745,7 +1745,7 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
     return series_map, skipped, partial_history
 
 
-def align_price_series(series_map, min_overlap_ratio: float = 0.18, ff_limit: int = 7):
+def align_price_series(series_map, min_overlap_ratio: float = 0.10, ff_limit: int = 15):
     if not series_map:
         return pd.DataFrame(), []
 
@@ -1759,11 +1759,11 @@ def align_price_series(series_map, min_overlap_ratio: float = 0.18, ff_limit: in
 
     for col in prices.columns:
         s = prices[col].dropna()
-        if len(s) < 40:
+        if len(s) < 20:
             dropped_cols.append(col)
             continue
         coverage = len(s) / max(total_rows, 1)
-        if coverage < 0.03:
+        if coverage < 0.01:
             dropped_cols.append(col)
             continue
         keep_cols.append(col)
@@ -1772,7 +1772,7 @@ def align_price_series(series_map, min_overlap_ratio: float = 0.18, ff_limit: in
         return pd.DataFrame(), list(prices.columns)
 
     trimmed = prices[keep_cols].copy()
-    trimmed = trimmed.ffill(limit=ff_limit).bfill(limit=2)
+    trimmed = trimmed.ffill(limit=ff_limit).bfill(limit=5)
 
     valid_row_counts = trimmed.notna().sum(axis=1)
     min_required = max(2, int(np.ceil(len(trimmed.columns) * min_overlap_ratio)))
@@ -1782,9 +1782,10 @@ def align_price_series(series_map, min_overlap_ratio: float = 0.18, ff_limit: in
         return pd.DataFrame(), list(set(list(prices.columns) + dropped_cols))
 
     final_keep = []
+    protected = {"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "SPY", "QQQ", "BTC-USD", "MSTR", "COIN", "PLTR", "ARM", "ARKK", "DPW.DE"}
     for col in trimmed.columns:
         coverage = trimmed[col].notna().mean()
-        if coverage >= 0.18:
+        if coverage >= 0.08 or col in protected:
             final_keep.append(col)
         else:
             dropped_cols.append(col)
@@ -1796,6 +1797,7 @@ def align_price_series(series_map, min_overlap_ratio: float = 0.18, ff_limit: in
     valid_row_counts = trimmed.notna().sum(axis=1)
     min_required = max(2, min(len(trimmed.columns), int(np.ceil(len(trimmed.columns) * min_overlap_ratio))))
     trimmed = trimmed.loc[valid_row_counts >= min_required].copy()
+    trimmed = trimmed.ffill(limit=ff_limit).bfill(limit=5)
     return trimmed, sorted(set(dropped_cols))
 
 def load_single_close(ticker, period):
@@ -1803,29 +1805,35 @@ def load_single_close(ticker, period):
     return s
 
 def compute_metrics(equity: pd.Series):
+    eq = pd.to_numeric(equity, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().copy()
+    eq = eq[eq > 0]
+    if eq.empty or len(eq) < 2:
+        return {
+            "total_return": 0.0,
+            "cagr": 0.0,
+            "max_dd": 0.0,
+            "volatility": 0.0,
+            "sharpe": 0.0,
+        }
 
-
-    returns = equity.pct_change().fillna(0)
-    total_return = (equity.iloc[-1] / equity.iloc[0] - 1) * 100
-    days = len(equity)
-    years = days / 252 if days > 0 else 0
-    if years > 0 and equity.iloc[0] > 0:
-        cagr = ((equity.iloc[-1] / equity.iloc[0]) ** (1 / years) - 1) * 100
-    else:
-        cagr = 0.0
-    rolling_max = equity.cummax()
-    drawdown = (equity / rolling_max - 1) * 100
-    max_dd = drawdown.min()
-    vol = returns.std() * np.sqrt(252) * 100
-    sharpe = 0.0
-    if returns.std() > 0:
-        sharpe = (returns.mean() / returns.std()) * np.sqrt(252)
+    returns = eq.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    start_val = float(eq.iloc[0])
+    end_val = float(eq.iloc[-1])
+    total_return = ((end_val / start_val) - 1.0) * 100.0 if start_val > 0 else 0.0
+    days = len(eq)
+    years = max(days / 252.0, 1 / 252.0)
+    cagr = (((end_val / start_val) ** (1.0 / years)) - 1.0) * 100.0 if start_val > 0 and end_val > 0 else 0.0
+    rolling_max = eq.cummax().replace(0, np.nan)
+    drawdown = ((eq / rolling_max) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0) * 100.0
+    max_dd = float(drawdown.min()) if not drawdown.empty else 0.0
+    vol = float(returns.std() * np.sqrt(252) * 100.0) if len(returns) > 1 else 0.0
+    sharpe = float((returns.mean() / returns.std()) * np.sqrt(252)) if returns.std() and returns.std() > 0 else 0.0
     return {
-        "total_return": float(total_return),
-        "cagr": float(cagr),
-        "max_dd": float(max_dd),
-        "volatility": float(vol),
-        "sharpe": float(sharpe),
+        "total_return": float(np.nan_to_num(total_return, nan=0.0, posinf=0.0, neginf=0.0)),
+        "cagr": float(np.nan_to_num(cagr, nan=0.0, posinf=0.0, neginf=0.0)),
+        "max_dd": float(np.nan_to_num(max_dd, nan=0.0, posinf=0.0, neginf=0.0)),
+        "volatility": float(np.nan_to_num(vol, nan=0.0, posinf=0.0, neginf=0.0)),
+        "sharpe": float(np.nan_to_num(sharpe, nan=0.0, posinf=0.0, neginf=0.0)),
     }
 
 def is_rebalance_day(current_date, prev_date, mode):
@@ -2038,28 +2046,28 @@ def get_regime_profile(regime_code: str) -> dict:
         "BULL": {
             "score_weights": {"trend": 0.24, "momentum": 0.34, "quality": 0.10, "risk": 0.12, "regime_fit": 0.20},
             "cash_target": 0.00,
-            "min_score": 38.0,
+            "min_score": 32.0,
             "invest_ratio": 1.00,
             "strategy": "Trend + Breakout Momentum",
         },
         "TRANSITION": {
             "score_weights": {"trend": 0.24, "momentum": 0.20, "quality": 0.22, "risk": 0.18, "regime_fit": 0.16},
-            "cash_target": 0.04,
-            "min_score": 42.0,
-            "invest_ratio": 0.96,
+            "cash_target": 0.02,
+            "min_score": 36.0,
+            "invest_ratio": 0.99,
             "strategy": "Quality + Momentum",
         },
         "BEAR": {
             "score_weights": {"trend": 0.18, "momentum": 0.12, "quality": 0.24, "risk": 0.28, "regime_fit": 0.18},
-            "cash_target": 0.12,
-            "min_score": 44.0,
-            "invest_ratio": 0.88,
+            "cash_target": 0.06,
+            "min_score": 38.0,
+            "invest_ratio": 0.94,
             "strategy": "Defensive Rotation",
         },
         "RECOVERY": {
             "score_weights": {"trend": 0.26, "momentum": 0.26, "quality": 0.14, "risk": 0.12, "regime_fit": 0.22},
-            "cash_target": 0.02,
-            "min_score": 40.0,
+            "cash_target": 0.00,
+            "min_score": 34.0,
             "invest_ratio": 1.00,
             "strategy": "Recovery Re-Entry",
         },
@@ -2178,6 +2186,19 @@ def compute_total_score_by_regime(prices: pd.DataFrame, regime_df: pd.DataFrame,
     return total.clip(lower=0, upper=100)
 
 def should_threshold_rebalance(date, regime_code: str, held_assets: list[str], selected_assets: list[str], current_weight_map: dict, target_weight_map: dict, score_today: pd.Series, component_scores: dict, last_regime_code: str | None) -> tuple[bool, str]:
+
+def should_skip_sale_for_tax(ticker: str, current_shares: float, target_shares: float, price: float, lots_state: dict, taxes_enabled: bool, regime_code: str, trend_score: float, score_gap: float) -> bool:
+    if not taxes_enabled or target_shares >= current_shares or current_shares <= 0 or price <= 0:
+        return False
+    if regime_code in {"BEAR"} or trend_score < 35 or score_gap > 12:
+        return False
+    lot = lots_state.get(ticker, {"shares": 0.0, "cost_total": 0.0})
+    avg_cost = (lot["cost_total"] / lot["shares"]) if lot.get("shares", 0.0) > 1e-12 else price
+    unrealized_gain_pct = ((price / avg_cost) - 1.0) * 100.0 if avg_cost > 0 else 0.0
+    reduction_ratio = (current_shares - target_shares) / current_shares if current_shares > 0 else 0.0
+    estimated_tax_drag_pct = max(unrealized_gain_pct, 0.0) * 0.26375 * reduction_ratio
+    return estimated_tax_drag_pct > 4.0 and regime_code in {"BULL", "RECOVERY", "TRANSITION"}
+
     if last_regime_code is not None and regime_code != last_regime_code:
         return True, "Regimewechsel"
     for ticker in selected_assets:
@@ -2316,6 +2337,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     rebalance_log = []
     trade_count = 0
     last_regime_code = None
+    estimated_tax_drag_pct_map = {}
 
     for i, date in enumerate(dates):
         current_prices = prices.loc[date]
@@ -2397,6 +2419,25 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
                 price = float(current_prices[tkr])
                 new_shares = target_values[tkr] / price if price > 0 else 0.0
                 old_shares = shares[tkr]
+                lot = bot_lots_state.get(tkr, {"shares": 0.0, "cost_total": 0.0})
+                avg_cost = (lot["cost_total"] / lot["shares"]) if lot.get("shares", 0.0) > 1e-12 else price
+                unrealized_gain_pct = ((price / avg_cost) - 1.0) * 100.0 if avg_cost > 0 else 0.0
+                reduction_ratio = ((old_shares - new_shares) / old_shares) if old_shares > 0 and new_shares < old_shares else 0.0
+                estimated_tax_drag_pct_map[tkr] = max(unrealized_gain_pct, 0.0) * 0.26375 * max(reduction_ratio, 0.0)
+                score_gap = float(total_score.loc[date].max() - total_score.loc[date].get(tkr, 0.0))
+                if should_skip_sale_for_tax(
+                    ticker=tkr,
+                    current_shares=old_shares,
+                    target_shares=new_shares,
+                    price=price,
+                    lots_state=bot_lots_state,
+                    taxes_enabled=simulate_taxes_de,
+                    regime_code=regime_code,
+                    trend_score=float(component_scores["trend"].loc[date].get(tkr, 50.0)),
+                    score_gap=score_gap,
+                ):
+                    new_shares = old_shares
+
                 updated_shares, delta_value, tax_due = apply_trade_with_tax(
                     ticker=tkr,
                     current_shares=old_shares,
@@ -2597,6 +2638,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         "ki_explanations_df": ki_explanations_df,
         "latest_top_asset_explanations": latest_top_asset_explanations,
         "enable_ki_explanations": bool(st.session_state.get("enable_ki_explanations", False)),
+        "estimated_tax_drag_pct_map": estimated_tax_drag_pct_map,
     }
 
 
@@ -2605,102 +2647,26 @@ def is_crypto_or_high_beta_ticker(ticker: str) -> bool:
     crypto_tokens = ["BTC", "ETH", "SOL", "MSTR", "COIN", "IBIT", "BITX", "ARKK", "HOOD"]
     return any(token in t for token in crypto_tokens)
 
-def build_local_ki_explanation(ticker: str, context: dict, lang: str) -> str:
-    trend = float(context.get("trend_score", 50))
-    momentum = float(context.get("momentum_score", 50))
-    quality = float(context.get("quality_score", 50))
-    risk = float(context.get("risk_score", 50))
-    regime = context.get("regime", "Transition")
-    strategy = context.get("strategy", "Dynamic Rotation")
-    if lang == "DE":
-        parts = []
-        if momentum >= 70 or trend >= 70:
-            parts.append(f"{ticker} wird bevorzugt, weil Trend ({trend:.0f}) und Momentum ({momentum:.0f}) aktuell stark sind.")
-        elif quality >= 65:
-            parts.append(f"{ticker} bleibt im Fokus, weil die Qualitäts- und Stabilitätswerte ({quality:.0f}) solide aussehen.")
-        else:
-            parts.append(f"{ticker} bleibt als chancenreicher Titel im Setup, obwohl die Signale gemischt sind.")
-        if is_crypto_or_high_beta_ticker(ticker):
-            parts.append(f"Im Regime '{regime}' erlaubt {strategy} bewusst mehr Raum für hochvolatile Gewinner.")
-        else:
-            parts.append(f"Im Regime '{regime}' passt der Titel gut zur aktiven Strategie '{strategy}'.")
-        return " ".join(parts[:2])
-    parts = []
-    if momentum >= 70 or trend >= 70:
-        parts.append(f"{ticker} is preferred because trend ({trend:.0f}) and momentum ({momentum:.0f}) are currently strong.")
-    elif quality >= 65:
-        parts.append(f"{ticker} stays in focus because quality and stability metrics ({quality:.0f}) look solid.")
-    else:
-        parts.append(f"{ticker} remains in the mix as an opportunity asset even with mixed signals.")
-    if is_crypto_or_high_beta_ticker(ticker):
-        parts.append(f"In the '{regime}' regime, {strategy} intentionally allows more room for high-volatility winners.")
-    else:
-        parts.append(f"In the '{regime}' regime, the asset fits the active '{strategy}' module well.")
-    return " ".join(parts[:2])
-
-@st.cache_data(show_spinner=False, ttl=43200)
-def _cached_grok_explanation(prompt_payload: str, api_key: str) -> str:
-    url = "https://api.x.ai/v1/chat/completions"
-    payload = {
-        "model": "grok-4.20-reasoning",
-        "messages": [
-            {
-                "role": "system",
-                "content": "Du bist ein präziser quantitativer Portfolio-Assistent. Antworte auf Deutsch, maximal 2 Sätze, konkret und ohne Marketing."
-            },
-            {
-                "role": "user",
-                "content": prompt_payload
-            }
-        ],
-        "max_tokens": 140
-    }
-    req = urllib_request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
-    with urllib_request.urlopen(req, timeout=25) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return (
-        data.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-        .strip()
-    )
-
 def get_ki_explanation(ticker: str, context: dict) -> str:
     lang = context.get("lang", "DE")
-    local_fallback = build_local_ki_explanation(ticker, context, lang)
-    api_key = st.secrets.get("GROK_API_KEY", "")
-    if not st.session_state.get("enable_ki_explanations", False):
-        return local_fallback
-    if not api_key:
-        return local_fallback
+    trend = float(context.get("trend_score", 50.0) or 50.0)
+    momentum = float(context.get("momentum_score", 50.0) or 50.0)
+    quality = float(context.get("quality_score", 50.0) or 50.0)
+    risk = float(context.get("risk_score", 50.0) or 50.0)
+    regime = str(context.get("regime", "Transition"))
+    tax_drag = float(context.get("estimated_tax_drag_pct", 0.0) or 0.0)
 
-    prompt_payload = (
-        f"Ticker: {ticker}\n"
-        f"Regime: {context.get('regime', '')}\n"
-        f"Strategie: {context.get('strategy', '')}\n"
-        f"Trend-Score: {context.get('trend_score', 0):.1f}\n"
-        f"Momentum-Score: {context.get('momentum_score', 0):.1f}\n"
-        f"Quality-Score: {context.get('quality_score', 0):.1f}\n"
-        f"Risk-Score: {context.get('risk_score', 0):.1f}\n"
-        f"Regime-Fit-Score: {context.get('regime_fit_score', 0):.1f}\n"
-        f"KI-Overlay: {context.get('ai_overlay', 0):.1f}\n"
-        f"Gesamtscore: {context.get('total_score', 0):.1f}\n"
-        f"High-Beta/Krypto: {'ja' if is_crypto_or_high_beta_ticker(ticker) else 'nein'}\n"
-        "Erkläre kurz, warum der Titel im aktuellen Allocato-Setup gewichtet wurde."
-    )
-    try:
-        response = _cached_grok_explanation(prompt_payload, api_key)
-        return response or local_fallback
-    except Exception:
-        return local_fallback
+    if lang == "DE":
+        lead = f"{ticker} bleibt interessant, weil Trend ({trend:.0f}) und Momentum ({momentum:.0f}) aktuell tragfähig wirken." if (trend >= 60 or momentum >= 60) else f"{ticker} ist eher eine Beimischung, weil die Signale aktuell gemischt sind."
+        tail = f"Im Regime '{regime}' passt der Titel gut zur aktuellen Auswahl." if quality >= 55 else f"Das Risiko ({risk:.0f}) ist höher, deshalb wird die Position nur dosiert gewichtet."
+        if tax_drag > 3:
+            tail += " Ein Verkauf wird zusätzlich gegen die geschätzte Steuerlast abgewogen."
+        return " ".join([lead, tail])[:260]
+    lead = f"{ticker} stays interesting because trend ({trend:.0f}) and momentum ({momentum:.0f}) still look constructive." if (trend >= 60 or momentum >= 60) else f"{ticker} is more of a smaller allocation because the signals are currently mixed."
+    tail = f"In the '{regime}' regime the asset still fits the active selection." if quality >= 55 else f"Risk ({risk:.0f}) is higher, so the position is sized more carefully."
+    if tax_drag > 3:
+        tail += " A sale is also weighed against the estimated tax drag."
+    return " ".join([lead, tail])[:260]
 
 def build_latest_top_asset_explanations(context: dict, lang: str) -> list[dict]:
     selected_assets_log = context.get("selected_assets_log", {})
@@ -2737,13 +2703,13 @@ def build_latest_top_asset_explanations(context: dict, lang: str) -> list[dict]:
             "regime_fit_score": float(row["Regime-Fit Score"]) if row is not None else 50.0,
             "ai_overlay": float(row["KI Overlay"]) if row is not None else 0.0,
             "total_score": float(row["Gesamtscore"]) if row is not None else 50.0,
+            "estimated_tax_drag_pct": float(context.get("estimated_tax_drag_pct_map", {}).get(ticker, 0.0)),
         }
         explanations.append({
             "ticker": ticker,
             "text": get_ki_explanation(ticker, context_payload),
         })
     return explanations
-
 
 def render_calculation_results(context, T, lang, tier):
     bot_metrics = context["bot_metrics"]
