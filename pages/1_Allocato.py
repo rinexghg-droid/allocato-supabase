@@ -53,9 +53,19 @@ ADMIN_EMAILS = {
 LIFETIME_WHITELIST = {
     "rinexghg@gmail.com",           # du
     "shima.babachahi@yahoo.com",    # neuer Beta-Tester (Shima)
+    "joel.tester@muster.de",        # Beta-Tester (Joel)
     # Hier weitere Beta-Tester hinzufügen:
     # "max.mustermann@gmail.com",
     # "anna.beispiel@web.de",
+}
+
+# Vordefinierte Test-Accounts:
+# Diese Accounts können sich direkt einloggen, auch wenn sie noch nicht manuell registriert wurden.
+SEEDED_TEST_ACCOUNTS = {
+    "joel.tester@muster.de": {
+        "password": "12345678",
+        "tier": "Lifetime",
+    },
 }
 
 # Optionale Einzel-Overrides für Tests außerhalb der Whitelist
@@ -204,6 +214,41 @@ def verify_password(password: str, stored_value: str) -> bool:
     except Exception:
         return False
 
+def get_seeded_test_account(email: str) -> dict | None:
+    normalized = normalize_email(email)
+    account = SEEDED_TEST_ACCOUNTS.get(normalized)
+    return account if isinstance(account, dict) else None
+
+def ensure_seeded_test_account_exists(email: str) -> tuple[bool, str]:
+    normalized = normalize_email(email)
+    account = get_seeded_test_account(normalized)
+    if not account:
+        return False, "Kein vordefinierter Test-Account."
+
+    try:
+        existing = get_user_row(normalized)
+        if existing is not None:
+            return True, "Test-Account bereits vorhanden."
+
+        now = datetime.utcnow().isoformat()
+        initial_state = json.dumps({}, ensure_ascii=False)
+        seeded_tier = account.get("tier", "Free")
+        seeded_tier = seeded_tier if seeded_tier in TIERS else "Free"
+
+        supabase = get_supabase_client()
+        supabase.table("users").insert({
+            "email": normalized,
+            "password_hash": hash_password(str(account.get("password", ""))),
+            "subscription_tier": seeded_tier,
+            "subscription_expires_at": get_default_subscription_expiry(seeded_tier),
+            "state_json": initial_state,
+            "created_at": now,
+            "updated_at": now,
+        }).execute()
+        return True, "Test-Account automatisch angelegt."
+    except Exception as e:
+        return False, f"Automatische Test-Account-Erstellung fehlgeschlagen: {e}"
+
 @st.cache_resource
 def get_supabase_client():
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -298,6 +343,18 @@ def login_user(email: str, password: str) -> tuple[bool, str]:
         row = get_user_row(normalized)
     except Exception as e:
         return False, f"Login fehlgeschlagen: {e}"
+
+    if row is None:
+        seeded = get_seeded_test_account(normalized)
+        if seeded and str(seeded.get("password", "")) == str(password):
+            created_ok, created_msg = ensure_seeded_test_account_exists(normalized)
+            if not created_ok:
+                return False, created_msg
+            try:
+                row = get_user_row(normalized)
+            except Exception as e:
+                return False, f"Login fehlgeschlagen: {e}"
+
     if row is None:
         return False, "Kein Konto mit dieser E-Mail gefunden."
     if not verify_password(password, row["password_hash"]):
