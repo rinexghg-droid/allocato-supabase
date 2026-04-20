@@ -640,6 +640,9 @@ defaults = {
     "target_cash_ceiling_pct": 8,
     "soft_cash_invest_ratio_pct": 98,
     "min_cash_reserve_pct": 5,
+    # OPTIMIERUNG v15: feste Cash-Reserve-Schwelle und fixer Mindestbetrag für große Portfolios
+    "fixed_cash_threshold_eur": 150000,
+    "fixed_min_cash_amount_eur": 12000,
     "score_override_threshold": 85,
     "weight_chart_top_n": 20,
     "top_n": 8,
@@ -714,6 +717,8 @@ PERSISTENT_STATE_KEYS = [
     "target_cash_ceiling_pct",
     "soft_cash_invest_ratio_pct",
     "min_cash_reserve_pct",
+    "fixed_cash_threshold_eur",
+    "fixed_min_cash_amount_eur",
     "score_override_threshold",
     "weight_chart_top_n",
     "top_n",
@@ -1067,6 +1072,11 @@ TRANSLATIONS = {
         "fast_preview_help": "Für schnelle Tests wird der Zeitraum automatisch auf maximal 5 Jahre begrenzt und Top-N bei Bedarf leicht reduziert.",
         "min_cash_reserve": "Mindest-Cash-Reserve (%)",
         "min_cash_reserve_help": "Diese Cash-Reserve bleibt standardmäßig erhalten. Nur bei außergewöhnlich starken Signalen darf sie temporär unterschritten werden.",
+        # OPTIMIERUNG v15: feste Cash-Reserve-Parameter für große Portfolios
+        "fixed_cash_threshold_eur": "Fester Mindest-Cash-Betrag ab X €",
+        "fixed_cash_threshold_eur_help": "Ab diesem Portfolio-Wert wechselt die Mindest-Cash-Logik von Prozent auf einen festen Euro-Betrag.",
+        "fixed_min_cash_amount_eur": "Fester Mindest-Cash-Betrag (€)",
+        "fixed_min_cash_amount_eur_help": "Mindest-Cash-Betrag für große Portfolios. Nur bei sehr hohen Scores darf er temporär unterschritten werden.",
         "score_override_threshold": "Override-Schwelle für Cash-Reserve (%)",
         "score_override_threshold_help": "Ab diesem Score darf der Bot die Mindest-Cash-Reserve für absolute Top-Gelegenheiten teilweise unterschreiten.",
         "visualization": "Visualisierung",
@@ -1391,6 +1401,11 @@ TRANSLATIONS = {
         "fast_preview_help": "For quicker tests the period is capped at 5 years and Top-N is reduced slightly when helpful.",
         "min_cash_reserve": "Minimum cash reserve (%)",
         "min_cash_reserve_help": "This reserve is kept by default. Only exceptionally strong signals may temporarily break below it.",
+        # OPTIMIERUNG v15: fixed cash reserve parameters for large portfolios
+        "fixed_cash_threshold_eur": "Fixed minimum cash amount from X €",
+        "fixed_cash_threshold_eur_help": "Above this portfolio value the minimum cash logic switches from percent to a fixed euro amount.",
+        "fixed_min_cash_amount_eur": "Fixed minimum cash amount (€)",
+        "fixed_min_cash_amount_eur_help": "Minimum cash amount for large portfolios. Only very high scores may temporarily break below it.",
         "score_override_threshold": "Cash-reserve override threshold (%)",
         "score_override_threshold_help": "Above this score the bot may partially dip below the minimum cash reserve for unusually strong opportunities.",
         "visualization": "Visualization",
@@ -2834,7 +2849,7 @@ def should_skip_sale_for_tax(ticker: str, current_shares: float, target_shares: 
 
 
 
-def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score: pd.DataFrame, regime_df: pd.DataFrame, component_scores: dict, effective_top_n: int, max_weight: float, soft_cash_mode: bool, cash_floor: float, cash_ceiling: float, soft_invest_ratio: float, min_score_user: float, conviction_power: float, min_cash_reserve: float = 0.05, score_override_threshold: float = 85.0) -> dict:
+def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score: pd.DataFrame, regime_df: pd.DataFrame, component_scores: dict, effective_top_n: int, max_weight: float, soft_cash_mode: bool, cash_floor: float, cash_ceiling: float, soft_invest_ratio: float, min_score_user: float, conviction_power: float, min_cash_reserve: float = 0.05, fixed_cash_threshold_eur: float = 150000.0, fixed_min_cash_amount_eur: float = 12000.0, current_portfolio_value: float = 0.0, score_override_threshold: float = 85.0) -> dict:
     regime_code = regime_df.loc[date, "regime_code"]
     profile = get_regime_profile(regime_code)
     available = current_prices.dropna().index.tolist()
@@ -2896,12 +2911,19 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
 
     shifted = selected - selected.min() + 1e-6
     weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.1, min(conviction_power, 2.0)))
-    base_cash_target = min(max(cash_floor, profile["cash_target"], min_cash_reserve), cash_ceiling)
+    # OPTIMIERUNG v15: Mindest-Cash als Prozent oder fixer Euro-Betrag je nach Portfoliogröße
+    portfolio_value = max(safe_float(current_portfolio_value, default=0.0), 0.0)
+    use_fixed_cash_amount = portfolio_value >= max(safe_float(fixed_cash_threshold_eur, default=150000.0), 0.0)
+    if use_fixed_cash_amount and portfolio_value > NUMERIC_EPS:
+        fixed_cash_ratio = np.clip(safe_div(fixed_min_cash_amount_eur, portfolio_value, default=0.0), 0.0, 1.0)
+        base_cash_target = float(np.clip(max(cash_floor, profile["cash_target"], fixed_cash_ratio), 0.0, cash_ceiling))
+    else:
+        base_cash_target = float(np.clip(max(cash_floor, profile["cash_target"], min_cash_reserve), 0.0, cash_ceiling))
     top_refined_score = float(selected.iloc[0]) if len(selected) else 0.0
     score_override_active = top_refined_score >= float(score_override_threshold)
     override_strength = float(np.clip((top_refined_score - float(score_override_threshold)) / 15.0, 0.0, 1.0)) if score_override_active else 0.0
-    reserve_release = min(min_cash_reserve * 0.75, min_cash_reserve * override_strength) if score_override_active else 0.0
-    effective_cash_target = float(np.clip(max(cash_floor, base_cash_target - reserve_release), 0.0, cash_ceiling))
+    reserve_release = min(base_cash_target * 0.75, base_cash_target * override_strength) if score_override_active else 0.0
+    effective_cash_target = float(np.clip(max(0.0, base_cash_target - reserve_release), 0.0, cash_ceiling))
     invest_ratio = min(max(1.0 - effective_cash_target, 0.70), min(0.985, soft_invest_ratio) if soft_cash_mode else 0.93)
     return {
         "selected": selected,
@@ -2911,11 +2933,12 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
         "strategy_name": profile["strategy"],
         "cash_target": effective_cash_target,
         "score_override_active": score_override_active,
+        "use_fixed_cash_amount": use_fixed_cash_amount,
         "refined_scores": refined_score_today,
     }
 
 @st.cache_data(ttl=3600, max_entries=80, show_spinner=False)
-def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, min_cash_reserve_pct: int = 5, score_override_threshold: int = 85, top_n: int = 8, simulate_taxes_de: bool = False, benchmark_tickers: tuple = (), weight_chart_top_n_value: int = 20, enable_ki_explanations_flag: bool = False, use_regime_filter_flag: bool = False, alignment_info: dict | None = None, strategy_cache_key: str = ""):
+def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, min_cash_reserve_pct: int = 5, fixed_cash_threshold_eur: float = 150000.0, fixed_min_cash_amount_eur: float = 12000.0, score_override_threshold: int = 85, top_n: int = 8, simulate_taxes_de: bool = False, benchmark_tickers: tuple = (), weight_chart_top_n_value: int = 20, enable_ki_explanations_flag: bool = False, use_regime_filter_flag: bool = False, alignment_info: dict | None = None, strategy_cache_key: str = ""):
     # OPTIMIERUNG v14: langlebigerer Simulations-Cache mit getrenntem strategy_cache_key
     prices = sanitize_price_panel(_prices.sort_index())
     tickers = list(prices.columns)
@@ -2929,6 +2952,9 @@ def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_
         cash_floor = min(cash_floor, cash_ceiling)
     soft_invest_ratio = float(np.clip(soft_cash_invest_ratio_pct / 100.0, 0.70, 1.0))
     min_cash_reserve = float(np.clip(min_cash_reserve_pct / 100.0, 0.0, 0.15))
+    # OPTIMIERUNG v15: fixer Mindest-Cash-Betrag für große Portfolios
+    fixed_cash_threshold_eur = max(0.0, safe_float(fixed_cash_threshold_eur, default=150000.0))
+    fixed_min_cash_amount_eur = max(0.0, safe_float(fixed_min_cash_amount_eur, default=12000.0))
     score_override_threshold = float(np.clip(score_override_threshold, 60, 99))
     tax_rate = 0.26375
     T_local = TRANSLATIONS[lang]
@@ -3032,6 +3058,10 @@ def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_
                 min_score_user=min_score,
                 conviction_power=conviction_power,
                 min_cash_reserve=min_cash_reserve,
+                # OPTIMIERUNG v15: Portfolioabhängige Cash-Reserve an Zielportfolio übergeben
+                fixed_cash_threshold_eur=fixed_cash_threshold_eur,
+                fixed_min_cash_amount_eur=fixed_min_cash_amount_eur,
+                current_portfolio_value=total_equity_before,
                 score_override_threshold=score_override_threshold,
             )
             tmp_selected = cached_strategy_payload["selected"]
@@ -3150,7 +3180,10 @@ def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_
             invested_value_after = float(np.nansum(np.where(valid_price_mask[i], shares_arr * current_prices_np, 0.0)))
             cash = max(0.0, total_equity_after_fees - invested_value_after - taxes_due_total)
             if not score_override_active:
+                # OPTIMIERUNG v15: prozentuale Reserve bis zur Schwelle, danach fixer Cash-Betrag
                 minimum_cash_now = max(0.0, total_equity_after_fees * min_cash_reserve)
+                if total_equity_after_fees >= fixed_cash_threshold_eur:
+                    minimum_cash_now = max(minimum_cash_now, fixed_min_cash_amount_eur)
                 if cash < minimum_cash_now and invested_value_after > 0:
                     deficit = minimum_cash_now - cash
                     reduction_factor = max(0.0, 1.0 - safe_div(deficit, invested_value_after, default=0.0))
@@ -3343,6 +3376,8 @@ def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_
         "target_cash_floor_pct": target_cash_floor_pct,
         "target_cash_ceiling_pct": target_cash_ceiling_pct,
         "min_cash_reserve_pct": min_cash_reserve_pct,
+        "fixed_cash_threshold_eur": fixed_cash_threshold_eur,
+        "fixed_min_cash_amount_eur": fixed_min_cash_amount_eur,
         "score_override_threshold": score_override_threshold,
         "equity_bot": equity_bot,
         "equity_bh": equity_bh,
@@ -4537,6 +4572,16 @@ if "min_cash_reserve_pct" in st.session_state:
         st.session_state["min_cash_reserve_pct"] = int(np.clip(int(st.session_state.get("min_cash_reserve_pct", 5)), 0, 15))
     except Exception:
         st.session_state["min_cash_reserve_pct"] = 5
+if "fixed_cash_threshold_eur" in st.session_state:
+    try:
+        st.session_state["fixed_cash_threshold_eur"] = int(max(0, int(st.session_state.get("fixed_cash_threshold_eur", 150000))))
+    except Exception:
+        st.session_state["fixed_cash_threshold_eur"] = 150000
+if "fixed_min_cash_amount_eur" in st.session_state:
+    try:
+        st.session_state["fixed_min_cash_amount_eur"] = int(max(0, int(st.session_state.get("fixed_min_cash_amount_eur", 12000))))
+    except Exception:
+        st.session_state["fixed_min_cash_amount_eur"] = 12000
 if "score_override_threshold" in st.session_state:
     try:
         st.session_state["score_override_threshold"] = int(np.clip(int(st.session_state.get("score_override_threshold", 85)), 60, 99))
@@ -4570,6 +4615,23 @@ min_cash_reserve_pct = st.sidebar.slider(
     help=T["min_cash_reserve_help"],
 )
 
+# OPTIMIERUNG v15: fixe Mindest-Cash-Beträge für größere Portfolios
+fixed_cash_threshold_eur = st.sidebar.number_input(
+    T["fixed_cash_threshold_eur"],
+    min_value=0,
+    step=10000,
+    key="fixed_cash_threshold_eur",
+    help=T["fixed_cash_threshold_eur_help"],
+)
+
+fixed_min_cash_amount_eur = st.sidebar.number_input(
+    T["fixed_min_cash_amount_eur"],
+    min_value=0,
+    step=1000,
+    key="fixed_min_cash_amount_eur",
+    help=T["fixed_min_cash_amount_eur_help"],
+)
+
 score_override_threshold = st.sidebar.slider(
     T["score_override_threshold"],
     min_value=60,
@@ -4590,7 +4652,7 @@ weight_chart_top_n = st.sidebar.slider(
     help=T["weight_chart_top_n_help"],
 )
 
-# OPTIMIERUNG v13: schnelle Vorschau für große Körbe mit automatischer Aktivierung ab 30 Assets
+# OPTIMIERUNG v15: schnelle Vorschau für große Körbe mit automatischer Aktivierung ab 35 Assets
 fast_preview = st.sidebar.checkbox(
     T["fast_preview"],
     key="fast_preview",
@@ -4797,7 +4859,7 @@ if calculate_clicked:
 
         effective_period = period
         effective_top_n = int(top_n)
-        # OPTIMIERUNG v14: intelligenter Fast-Preview-Modus ab 35 Assets mit klarerem Hinweis
+        # OPTIMIERUNG v15: Fast Preview automatisch ab 35 Assets mit klarem Hinweis
         auto_fast_preview = len(tickers) >= 35
         effective_fast_preview = bool(st.session_state.get("fast_preview", False)) or auto_fast_preview
         if effective_fast_preview and len(tickers) >= 35:
@@ -4807,8 +4869,8 @@ if calculate_clicked:
             if period not in {"1y", "2y", "3y", "5y"}:
                 effective_period = "5y"
             effective_top_n = min(int(top_n), 8)
-        if auto_fast_preview and not bool(st.session_state.get("fast_preview", False)):
-            st.info("⚡ Fast Preview aktiviert – für maximale Geschwindigkeit (5 Jahre / Top-N max. 8)." if lang == "DE" else "⚡ Fast Preview activated – for maximum speed (5 years / Top-N max. 8).")
+        if auto_fast_preview:
+            st.info("⚡ Fast Preview aktiviert – für maximale Geschwindigkeit." if lang == "DE" else "⚡ Fast Preview activated – for maximum speed.")
 
         # Witzige & unterhaltsame Fortschrittsmeldungen
         load_progress.progress(0.10, text="Der Bot trinkt gerade seinen Morgenkaffee ☕ und schaut die Charts an...")
@@ -4886,6 +4948,8 @@ if calculate_clicked:
                 target_cash_ceiling_pct=int(target_cash_ceiling_pct),
                 soft_cash_invest_ratio_pct=int(soft_cash_invest_ratio_pct),
                 min_cash_reserve_pct=int(min_cash_reserve_pct),
+                fixed_cash_threshold_eur=float(fixed_cash_threshold_eur),
+                fixed_min_cash_amount_eur=float(fixed_min_cash_amount_eur),
                 score_override_threshold=int(score_override_threshold),
                 top_n=int(effective_top_n),
                 simulate_taxes_de=bool(simulate_taxes_de),
@@ -4893,7 +4957,7 @@ if calculate_clicked:
                 weight_chart_top_n_value=int(weight_chart_top_n),
                 enable_ki_explanations_flag=bool(enable_ki_explanations),
                 use_regime_filter_flag=bool(use_regime_filter),
-                strategy_cache_key=build_strategy_cache_key(prices, effective_period, lang, initial_capital, monthly_savings, rebalance_freq, fee_pct, min_score, max_weight_pct, vol_penalty, cash_interest_pct, conviction_power, soft_cash_mode, target_cash_floor_pct, target_cash_ceiling_pct, soft_cash_invest_ratio_pct, min_cash_reserve_pct, score_override_threshold, effective_top_n, simulate_taxes_de, tuple(get_benchmark_list()), weight_chart_top_n, enable_ki_explanations, use_regime_filter, st.session_state.get("fast_preview", False), "simulate"),
+                strategy_cache_key=build_strategy_cache_key(prices, effective_period, lang, initial_capital, monthly_savings, rebalance_freq, fee_pct, min_score, max_weight_pct, vol_penalty, cash_interest_pct, conviction_power, soft_cash_mode, target_cash_floor_pct, target_cash_ceiling_pct, soft_cash_invest_ratio_pct, min_cash_reserve_pct, fixed_cash_threshold_eur, fixed_min_cash_amount_eur, score_override_threshold, effective_top_n, simulate_taxes_de, tuple(get_benchmark_list()), weight_chart_top_n, enable_ki_explanations, use_regime_filter, effective_fast_preview, "simulate"),
                 alignment_info=alignment_info,
             )
         except ValueError:
