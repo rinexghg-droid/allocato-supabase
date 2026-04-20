@@ -2004,6 +2004,7 @@ def safe_portfolio_cap(initial_capital: float, monthly_savings: float, periods: 
 
 # OPTIMIERUNG v10: leichte, stabile Cache-Keys für große Simulationen
 def build_prices_cache_key(prices: pd.DataFrame, period: str, *parts) -> str:
+    # OPTIMIERUNG v12: robusterer Cache-Key mit Form, Zeitraum, Ticker-Set und kompaktem Werte-Fingerprint
     if prices is None or prices.empty:
         base = f"empty|{period}"
     else:
@@ -2011,11 +2012,13 @@ def build_prices_cache_key(prices: pd.DataFrame, period: str, *parts) -> str:
         end = str(prices.index.max())
         cols = "|".join(map(str, prices.columns))
         shape = f"{prices.shape[0]}x{prices.shape[1]}"
-        checksum = f"{float(pd.to_numeric(prices.iloc[-1], errors='coerce').fillna(0.0).sum()):.6f}"
-        base = f"{period}|{shape}|{start}|{end}|{cols}|{checksum}"
+        head_sig = prices.head(3).to_csv(index=True)
+        tail_sig = prices.tail(3).to_csv(index=True)
+        value_sig = f"{float(pd.to_numeric(prices.iloc[-1], errors='coerce').fillna(0.0).sum()):.8f}"
+        digest = hashlib.sha256(f"{head_sig}|{tail_sig}|{value_sig}".encode("utf-8")).hexdigest()[:16]
+        base = f"{period}|{shape}|{start}|{end}|{cols}|{digest}"
     extra = "|".join(map(str, parts))
     return hashlib.sha256(f"{base}|{extra}".encode("utf-8")).hexdigest()
-
 
 def _safe_series_history_stats(series_map: dict) -> pd.DataFrame:
     rows = []
@@ -2092,7 +2095,7 @@ def _split_bulk_close_panel(raw: pd.DataFrame, tickers: list[str]) -> dict:
 
 
 def _bulk_download_once(tickers: list[str], period: str, auto_adjust: bool) -> dict:
-    # OPTIMIERUNG v10: ein einzelner Bulk-yfinance-Call statt Einzelabrufe
+    # OPTIMIERUNG v12: ein einzelner Bulk-yfinance-Call statt Einzelabrufe
     if not tickers:
         return {}
     try:
@@ -2111,40 +2114,28 @@ def _bulk_download_once(tickers: list[str], period: str, auto_adjust: bool) -> d
 
 
 def _download_with_fallbacks(ticker: str, period: str) -> pd.Series:
-    bulk_map = _load_close_prices_cached((ticker,), period)
+    bulk_map = _load_close_prices_cached((ticker,), period, cache_key=f"single|{ticker}|{period}")
     series_map = bulk_map.get("series_map", {})
     return series_map.get(ticker, pd.Series(dtype=float))
 
 
 @st.cache_data(ttl=3600, max_entries=100, show_spinner=False)
 def _load_close_prices_cached(tickers_tuple, period: str):
+    # OPTIMIERUNG v11: genau ein Bulk-yfinance-Call pro Ladezyklus
     tickers = [str(t).strip() for t in tickers_tuple if str(t).strip()]
     meta = get_period_metadata(period)
     yf_period = meta["yf_period"]
     preferred_points = meta["preferred_points"]
     floor_start = get_backtest_floor_date(period)
 
-    candidates = [
-        (yf_period, True),
-        (yf_period, False),
-    ]
-    if yf_period != "max":
-        candidates.extend([("max", True), ("max", False)])
-
-    best_series_map = {}
-    for candidate_period, auto_adjust in candidates:
-        candidate_map = _bulk_download_once(tickers, candidate_period, auto_adjust)
-        if len(candidate_map) > len(best_series_map):
-            best_series_map = candidate_map
-        if len(best_series_map) == len(tickers):
-            break
+    bulk_series_map = _bulk_download_once(tickers, yf_period, True)
 
     series_map = {}
     skipped = []
     partial_history = []
 
     for ticker in tickers:
-        s = best_series_map.get(ticker, pd.Series(dtype=float))
+        s = bulk_series_map.get(ticker, pd.Series(dtype=float))
         if s.empty:
             skipped.append(ticker)
             continue
@@ -2167,7 +2158,7 @@ def _load_close_prices_cached(tickers_tuple, period: str):
 
 
 def load_close_prices(tickers, period, progress_bar=None, status_box=None):
-    # OPTIMIERUNG v10: kompletter Bulk-yfinance-Download über den gecachten Sammelabruf
+    # OPTIMIERUNG v12: kompletter Bulk-yfinance-Download über genau einen Sammelabruf
     tickers = [str(t).strip() for t in tickers if str(t).strip()]
     total = max(len(tickers), 1)
 
@@ -2178,7 +2169,7 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
     if progress_bar is not None:
         progress_bar.progress(0.10, text=(f"Lade {len(tickers)} Assets…" if st.session_state.get("language", "DE") == "DE" else f"Loading {len(tickers)} assets…"))
 
-    cached = _load_close_prices_cached(tuple(tickers), period)
+    cached = _load_close_prices_cached(tuple(tickers), period, cache_key=hashlib.sha256(f"{'|'.join(tickers)}|{period}".encode('utf-8')).hexdigest())
 
     if progress_bar is not None:
         progress_bar.progress(0.22, text=("Bereite Bulk-Download vor …" if st.session_state.get("language", "DE") == "DE" else "Preparing bulk download …"))
@@ -2282,7 +2273,7 @@ def load_single_close(ticker, period):
 
 @st.cache_data(ttl=3600, max_entries=100, show_spinner=False)
 def load_benchmark_series_bulk(tickers_tuple, period: str):
-    cached = _load_close_prices_cached(tuple(tickers_tuple), period)
+    cached = _load_close_prices_cached(tuple(tickers_tuple), period, cache_key=hashlib.sha256(f"{'|'.join(tickers_tuple)}|{period}|bench".encode('utf-8')).hexdigest())
     return cached.get("series_map", {})
 
 def compute_metrics(equity: pd.Series):
@@ -2753,7 +2744,7 @@ def compute_ai_overlay_scores(prices: pd.DataFrame, component_scores: dict, lang
 
 @st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
 def compute_regime_and_scores_cached(_prices: pd.DataFrame, period: str, lang: str, vol_penalty: float, cache_key: str = ""):
-    # OPTIMIERUNG v10: stabilerer Cache-Key, DataFrame selbst wird bewusst aus dem Hash ausgeschlossen
+    # OPTIMIERUNG v12: stabilerer Cache-Key, DataFrame selbst wird bewusst aus dem Hash ausgeschlossen
     regime_df, _ = compute_market_regime(_prices, period, lang)
     component_scores = compute_component_score_table(_prices, regime_df, vol_penalty)
     ai_overlay_scores, ai_explanations = compute_ai_overlay_scores(_prices, component_scores, lang)
@@ -2924,7 +2915,7 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
 
 @st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
 def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, min_cash_reserve_pct: int = 5, score_override_threshold: int = 85, top_n: int = 8, simulate_taxes_de: bool = False, benchmark_tickers: tuple = (), weight_chart_top_n_value: int = 20, enable_ki_explanations_flag: bool = False, use_regime_filter_flag: bool = False, alignment_info: dict | None = None, cache_key: str = ""):
-    # OPTIMIERUNG v10: stabilerer Cache-Key, Preispanel selbst wird aus dem Streamlit-Hash ausgeschlossen
+    # OPTIMIERUNG v12: stabilerer Cache-Key, Preispanel selbst wird aus dem Streamlit-Hash ausgeschlossen
     prices = sanitize_price_panel(_prices.sort_index().copy())
     tickers = list(prices.columns)
     effective_top_n = min(top_n, len(tickers))
@@ -4597,7 +4588,7 @@ weight_chart_top_n = st.sidebar.slider(
     help=T["weight_chart_top_n_help"],
 )
 
-# OPTIMIERUNG v10: schnelle Vorschau für große Körbe
+# OPTIMIERUNG v12: schnelle Vorschau für große Körbe mit automatischer Aktivierung ab 30 Assets
 fast_preview = st.sidebar.checkbox(
     T["fast_preview"],
     key="fast_preview",
@@ -4623,98 +4614,119 @@ save_logged_in_user_state()
 if can_use_asset_search():
     st.sidebar.subheader(T["asset_search_section"])
 
-    search_query = st.sidebar.text_input(
-        T["asset_search_query"],
-        key="asset_search_query",
-        help=T["asset_search_query_help"],
-        placeholder="AAPL, Apple, US0378331005 ...",
-    )
-
-    filtered_assets = filter_asset_catalog(search_query)
-    if filtered_assets.empty:
-        st.sidebar.info(T["search_no_results"])
-    else:
-        filtered_assets = filtered_assets.copy()
-        filtered_assets["display"] = filtered_assets.apply(lambda row: format_search_option(row, T), axis=1)
-        current_selected_displays = st.session_state.get("asset_search_select", [])
-        if not isinstance(current_selected_displays, (list, tuple, set)):
-            current_selected_displays = []
-        current_selected_displays = [str(x) for x in current_selected_displays]
-        valid_display_options = filtered_assets["display"].tolist()
-        preselected_displays = [x for x in current_selected_displays if x in valid_display_options]
-        if search_query.strip() and not preselected_displays:
-            preselected_displays = valid_display_options[:1]
-
-        selected_displays = st.sidebar.multiselect(
-            T["asset_search_result"],
-            options=valid_display_options,
-            default=preselected_displays,
-            key="asset_search_select_widget",
-            help=T["search_info"],
+    # OPTIMIERUNG v12: Premium Live-Suchleiste mit Multi-Select und klaren Add-Buttons
+    with st.sidebar.expander("✨ Smart Asset Search", expanded=True):
+        st.markdown(
+            """
+            <div style="padding:0.95rem 1rem;border-radius:18px;background:linear-gradient(135deg, rgba(15,23,42,0.98) 0%, rgba(30,41,59,0.98) 100%);border:1px solid rgba(255,255,255,0.08);box-shadow:0 10px 28px rgba(0,0,0,0.22);margin-bottom:0.7rem;">
+                <div style="font-size:0.78rem;letter-spacing:0.10em;text-transform:uppercase;color:rgba(147,197,253,0.95);font-weight:800;">Live Search</div>
+                <div style="font-size:0.98rem;color:rgba(248,250,252,0.90);line-height:1.45;margin-top:0.30rem;">Suche blitzschnell nach Ticker, Name, ISIN oder WKN – die Trefferliste klappt direkt unter dem Feld auf.</div>
+            </div>
+            """ if lang == "DE" else """
+            <div style="padding:0.95rem 1rem;border-radius:18px;background:linear-gradient(135deg, rgba(15,23,42,0.98) 0%, rgba(30,41,59,0.98) 100%);border:1px solid rgba(255,255,255,0.08);box-shadow:0 10px 28px rgba(0,0,0,0.22);margin-bottom:0.7rem;">
+                <div style="font-size:0.78rem;letter-spacing:0.10em;text-transform:uppercase;color:rgba(147,197,253,0.95);font-weight:800;">Live Search</div>
+                <div style="font-size:0.98rem;color:rgba(248,250,252,0.90);line-height:1.45;margin-top:0.30rem;">Search instantly by ticker, name, ISIN or WKN – results expand elegantly right below the field.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        st.session_state["asset_search_select"] = list(selected_displays)
 
-        # === MODERNER ASSET-SEARCH MIT + BUTTONS ===
-        for _, row in filtered_assets.iterrows():
-            col1, col2 = st.sidebar.columns([6, 1], gap="small")
+        search_query = st.text_input(
+            T["asset_search_query"],
+            key="asset_search_query",
+            help=T["asset_search_query_help"],
+            placeholder=("NVDA, SAP, DE0007164600, 716460 ..." if lang == "DE" else "NVDA, SAP, DE0007164600, 716460 ..."),
+        )
 
-            with col1:
-                st.markdown(
-                    f"""
-                    <div style="padding: 12px 14px; margin: 6px 0; border-radius: 14px;
-                                background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);">
-                        <b style="font-size: 0.95rem;">{row['ticker']}</b><br>
-                        <span style="opacity: 0.9; font-size: 0.88rem;">{row['name']}</span><br>
-                        <span style="opacity: 0.65; font-size: 0.78rem;">ISIN: {row['isin']}</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+        filtered_assets = filter_asset_catalog(search_query)
+        if filtered_assets.empty:
+            st.info(T["search_no_results"])
+        else:
+            filtered_assets = filtered_assets.copy()
+            filtered_assets["display"] = filtered_assets.apply(lambda row: format_search_option(row, T), axis=1)
+            filtered_assets["headline"] = filtered_assets.apply(lambda row: f"{row['ticker']} · {row['name']}", axis=1)
+            filtered_assets["subline"] = filtered_assets.apply(lambda row: f"ISIN: {row['isin']} · WKN: {row['wkn']}", axis=1)
 
-            with col2:
-                if st.button(
-                    "＋",
-                    key=f"quick_add_{row['ticker']}",
-                    use_container_width=True,
-                    help=f"{row['ticker']} zum Korb hinzufügen" if lang == "DE" else f"Add {row['ticker']} to basket",
-                ):
-                    add_ticker_to_basket(row["ticker"])
+            valid_display_options = filtered_assets["display"].tolist()
+            previous_selected = st.session_state.get("asset_search_select", [])
+            if not isinstance(previous_selected, (list, tuple, set)):
+                previous_selected = []
+            previous_selected = [str(x) for x in previous_selected if str(x) in valid_display_options]
+
+            selected_displays = st.multiselect(
+                "Multi-Select",
+                options=valid_display_options,
+                default=previous_selected,
+                key="asset_search_select_widget",
+                help=T["search_info"],
+                label_visibility="collapsed",
+                placeholder=("Mehrere Assets markieren …" if lang == "DE" else "Select multiple assets …"),
+            )
+            st.session_state["asset_search_select"] = list(selected_displays)
+
+            st.caption(
+                (f"{len(filtered_assets)} Treffer · {len(selected_displays)} markiert" if lang == "DE" else f"{len(filtered_assets)} results · {len(selected_displays)} selected")
+            )
+
+            st.markdown("<div style='margin-top:0.15rem;'></div>", unsafe_allow_html=True)
+            for _, row in filtered_assets.iterrows():
+                is_selected = row["display"] in selected_displays
+                row_bg = "rgba(59,130,246,0.10)" if is_selected else "rgba(255,255,255,0.035)"
+                row_border = "rgba(96,165,250,0.34)" if is_selected else "rgba(255,255,255,0.07)"
+                info_col, action_col = st.columns([5.6, 1.7], gap="small")
+                with info_col:
+                    st.markdown(
+                        f"""
+                        <div style="padding:0.78rem 0.9rem;border-radius:16px;background:{row_bg};border:1px solid {row_border};margin:0.12rem 0 0.22rem 0;transition:all .2s ease;">
+                            <div style="font-weight:800;font-size:0.96rem;color:#f8fafc;line-height:1.2;">{row['headline']}</div>
+                            <div style="font-size:0.77rem;color:rgba(248,250,252,0.62);margin-top:0.22rem;">{row['subline']}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                with action_col:
+                    if st.button(
+                        "＋ Hinzufügen" if lang == "DE" else "＋ Add",
+                        key=f"quick_add_v12_{row['ticker']}",
+                        use_container_width=True,
+                        help=(f"{row['ticker']} direkt zum Korb hinzufügen" if lang == "DE" else f"Add {row['ticker']} directly to basket"),
+                    ):
+                        add_ticker_to_basket(row["ticker"])
+                        save_active_basket_to_state()
+                        save_logged_in_user_state()
+                        st.success(T["added_asset_msg"].format(ticker=row["ticker"]))
+                        st.rerun()
+
+            add_cols = st.columns([1, 1], gap="small")
+            if add_cols[0].button(
+                "＋ Alle ausgewählten hinzufügen" if lang == "DE" else "＋ Add selected",
+                use_container_width=True,
+                type="secondary",
+                key="add_selected_visible_assets_btn",
+            ):
+                selected_tickers = filtered_assets.loc[filtered_assets["display"].isin(selected_displays), "ticker"].tolist()
+                if selected_tickers:
+                    add_multiple_tickers_to_basket(selected_tickers)
                     save_active_basket_to_state()
                     save_logged_in_user_state()
-                    st.sidebar.success(f"✅ {row['ticker']} hinzugefügt" if lang == "DE" else f"✅ {row['ticker']} added")
+                    st.success(T["added_all_assets_msg"].format(count=len(selected_tickers)))
                     st.rerun()
 
-        # Schöne "Alle hinzufügen" Buttons
-        add_cols = st.sidebar.columns([1, 1], gap="small")
-        if add_cols[0].button(
-            "＋ Alle ausgewählten hinzufügen" if lang == "DE" else "＋ Add all selected",
-            use_container_width=True,
-            type="secondary",
-            key="add_selected_visible_assets_btn",
-        ):
-            selected_tickers = filtered_assets.loc[filtered_assets["display"].isin(selected_displays), "ticker"].tolist()
-            if selected_tickers:
-                add_multiple_tickers_to_basket(selected_tickers)
-                save_active_basket_to_state()
-                save_logged_in_user_state()
-                st.sidebar.success(f"✅ {len(selected_tickers)} Assets hinzugefügt" if lang == "DE" else f"✅ Added {len(selected_tickers)} assets")
-                st.rerun()
+            if add_cols[1].button(
+                "Alle sichtbaren hinzufügen" if lang == "DE" else "Add all visible",
+                use_container_width=True,
+                type="primary",
+                key="add_all_visible_assets_btn",
+            ):
+                all_visible = filtered_assets["ticker"].tolist()
+                if all_visible:
+                    add_multiple_tickers_to_basket(all_visible)
+                    save_active_basket_to_state()
+                    save_logged_in_user_state()
+                    st.success(T["added_all_assets_msg"].format(count=len(all_visible)))
+                    st.rerun()
 
-        if add_cols[1].button(
-            "Alle sichtbaren hinzufügen" if lang == "DE" else "Add all visible",
-            use_container_width=True,
-            type="primary",
-            key="add_all_visible_assets_btn",
-        ):
-            all_visible = filtered_assets["ticker"].tolist()
-            if all_visible:
-                add_multiple_tickers_to_basket(all_visible)
-                save_active_basket_to_state()
-                save_logged_in_user_state()
-                st.sidebar.success(f"✅ Alle {len(all_visible)} Assets hinzugefügt" if lang == "DE" else f"✅ Added all {len(all_visible)} assets")
-                st.rerun()
-
-    st.sidebar.caption(T["search_info"])
+        st.caption(T["search_info"])
 else:
     st.sidebar.subheader(T["asset_search_section"])
     st.sidebar.caption(T["search_locked"])
@@ -4832,10 +4844,18 @@ if calculate_clicked:
 
         effective_period = period
         effective_top_n = int(top_n)
-        if bool(st.session_state.get("fast_preview", False)):
+        # OPTIMIERUNG v12: Fast Preview greift automatisch bei großen Körben und kappt auf 5y + Top-N <= 6
+        auto_fast_preview = len(tickers) >= 30
+        effective_fast_preview = bool(st.session_state.get("fast_preview", False)) or auto_fast_preview
+        if effective_fast_preview and len(tickers) >= 30:
+            effective_period = "5y"
+            effective_top_n = min(int(top_n), 6)
+        elif effective_fast_preview:
             if period not in {"1y", "2y", "3y", "5y"}:
                 effective_period = "5y"
             effective_top_n = min(int(top_n), 6)
+        if auto_fast_preview and not bool(st.session_state.get("fast_preview", False)):
+            st.info("⚡ Fast Preview wurde für diesen großen Korb automatisch aktiviert (5 Jahre / Top-N max. 6)." if lang == "DE" else "⚡ Fast Preview was activated automatically for this large basket (5 years / Top-N max. 6).")
 
         # Witzige & unterhaltsame Fortschrittsmeldungen
         load_progress.progress(0.10, text="Der Bot trinkt gerade seinen Morgenkaffee ☕ und schaut die Charts an...")
