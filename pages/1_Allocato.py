@@ -1634,12 +1634,13 @@ def queue_preset(name: str):
 def mark_period_user_override():
     st.session_state["period_user_override"] = True
 
+# OPTIMIERUNG v14: größere Körbe standardmäßig früher auf schnellere Zeiträume lenken
 def auto_adjust_period_for_large_baskets(asset_count: int, tier_now: str):
     if tier_now == "Free" or st.session_state.get("period_user_override", False):
         return
-    recommended = "10y" if asset_count <= 50 else "5y"
+    recommended = "5y" if asset_count >= 35 else ("10y" if asset_count > 30 else st.session_state.get("period", defaults["period"]))
     current_period = st.session_state.get("period", defaults["period"])
-    if current_period in {"15y", "20y", "max"} or (current_period == defaults.get("period") and asset_count > 30):
+    if current_period in {"10y", "15y", "20y", "max"} or (current_period == defaults.get("period") and asset_count > 30):
         st.session_state["period"] = recommended
 
 def apply_pending_preset():
@@ -2004,7 +2005,7 @@ def safe_portfolio_cap(initial_capital: float, monthly_savings: float, periods: 
 
 # OPTIMIERUNG v10: leichte, stabile Cache-Keys für große Simulationen
 def build_prices_cache_key(prices: pd.DataFrame, period: str, *parts) -> str:
-    # OPTIMIERUNG v12: robusterer Cache-Key mit Form, Zeitraum, Ticker-Set und kompaktem Werte-Fingerprint
+    # OPTIMIERUNG v13: robusterer Cache-Key mit Form, Zeitraum, Ticker-Set und kompaktem Werte-Fingerprint
     if prices is None or prices.empty:
         base = f"empty|{period}"
     else:
@@ -2019,6 +2020,16 @@ def build_prices_cache_key(prices: pd.DataFrame, period: str, *parts) -> str:
         base = f"{period}|{shape}|{start}|{end}|{cols}|{digest}"
     extra = "|".join(map(str, parts))
     return hashlib.sha256(f"{base}|{extra}".encode("utf-8")).hexdigest()
+
+# OPTIMIERUNG v14: getrennte Cache-Keys für Preisdaten und Strategie-Simulation
+def build_price_cache_key(tickers, period: str) -> str:
+    clean_tickers = [str(t).strip().upper() for t in tickers if str(t).strip()]
+    payload = f"prices|{period}|{'|'.join(clean_tickers)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+def build_strategy_cache_key(prices: pd.DataFrame, period: str, *parts) -> str:
+    return build_prices_cache_key(prices, period, "strategy", *parts)
+
 
 def _safe_series_history_stats(series_map: dict) -> pd.DataFrame:
     rows = []
@@ -2095,7 +2106,7 @@ def _split_bulk_close_panel(raw: pd.DataFrame, tickers: list[str]) -> dict:
 
 
 def _bulk_download_once(tickers: list[str], period: str, auto_adjust: bool) -> dict:
-    # OPTIMIERUNG v12: ein einzelner Bulk-yfinance-Call statt Einzelabrufe
+    # OPTIMIERUNG v14: ein einzelner Bulk-yfinance-Call mit auto_adjust=True für alle Assets
     if not tickers:
         return {}
     try:
@@ -2114,14 +2125,15 @@ def _bulk_download_once(tickers: list[str], period: str, auto_adjust: bool) -> d
 
 
 def _download_with_fallbacks(ticker: str, period: str) -> pd.Series:
-    bulk_map = _load_close_prices_cached((ticker,), period, cache_key=f"single|{ticker}|{period}")
+    bulk_map = _load_close_prices_cached((ticker,), period, price_cache_key=build_price_cache_key((ticker,), period))
     series_map = bulk_map.get("series_map", {})
     return series_map.get(ticker, pd.Series(dtype=float))
 
 
-@st.cache_data(ttl=3600, max_entries=100, show_spinner=False)
-def _load_close_prices_cached(tickers_tuple, period: str):
-    # OPTIMIERUNG v11: genau ein Bulk-yfinance-Call pro Ladezyklus
+@st.cache_data(ttl=3600, max_entries=80, show_spinner=False)
+def _load_close_prices_cached(tickers_tuple, period: str, price_cache_key: str = ""):
+    # OPTIMIERUNG v14: aggressiverer Preis-Cache mit sauber getrenntem price_cache_key
+    # OPTIMIERUNG v14: Bulk-Download bleibt ein einzelner yfinance-Sammelabruf
     tickers = [str(t).strip() for t in tickers_tuple if str(t).strip()]
     meta = get_period_metadata(period)
     yf_period = meta["yf_period"]
@@ -2129,26 +2141,14 @@ def _load_close_prices_cached(tickers_tuple, period: str):
     floor_start = get_backtest_floor_date(period)
 
     bulk_series_map = _bulk_download_once(tickers, yf_period, True)
+    available_tickers = [ticker for ticker in tickers if not bulk_series_map.get(ticker, pd.Series(dtype=float)).empty]
+    skipped = [ticker for ticker in tickers if ticker not in available_tickers]
+    series_map = {ticker: bulk_series_map[ticker].sort_index() for ticker in available_tickers}
 
-    series_map = {}
-    skipped = []
-    partial_history = []
-
-    for ticker in tickers:
-        s = bulk_series_map.get(ticker, pd.Series(dtype=float))
-        if s.empty:
-            skipped.append(ticker)
-            continue
-
-        s = s.sort_index()
-        if floor_start is not None:
-            floor_observations = int((s.index >= floor_start).sum())
-            if floor_observations < preferred_points:
-                partial_history.append(ticker)
-        elif len(s) < preferred_points:
-            partial_history.append(ticker)
-
-        series_map[ticker] = s
+    if floor_start is not None:
+        partial_history = [ticker for ticker, s in series_map.items() if int((s.index >= floor_start).sum()) < preferred_points]
+    else:
+        partial_history = [ticker for ticker, s in series_map.items() if len(s) < preferred_points]
 
     return {
         "series_map": series_map,
@@ -2158,7 +2158,7 @@ def _load_close_prices_cached(tickers_tuple, period: str):
 
 
 def load_close_prices(tickers, period, progress_bar=None, status_box=None):
-    # OPTIMIERUNG v12: kompletter Bulk-yfinance-Download über genau einen Sammelabruf
+    # OPTIMIERUNG v14: kompletter Bulk-yfinance-Download über genau einen Sammelabruf
     tickers = [str(t).strip() for t in tickers if str(t).strip()]
     total = max(len(tickers), 1)
 
@@ -2169,7 +2169,8 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
     if progress_bar is not None:
         progress_bar.progress(0.10, text=(f"Lade {len(tickers)} Assets…" if st.session_state.get("language", "DE") == "DE" else f"Loading {len(tickers)} assets…"))
 
-    cached = _load_close_prices_cached(tuple(tickers), period, cache_key=hashlib.sha256(f"{'|'.join(tickers)}|{period}".encode('utf-8')).hexdigest())
+    price_cache_key = build_price_cache_key(tickers, period)
+    cached = _load_close_prices_cached(tuple(tickers), period, price_cache_key=price_cache_key)
 
     if progress_bar is not None:
         progress_bar.progress(0.22, text=("Bereite Bulk-Download vor …" if st.session_state.get("language", "DE") == "DE" else "Preparing bulk download …"))
@@ -2193,7 +2194,7 @@ def load_close_prices(tickers, period, progress_bar=None, status_box=None):
     return series_map, skipped, partial_history
 
 
-def align_price_series(series_map, period: str, min_live_assets: int = 2, ff_limit: int = 7):
+def align_price_series(series_map, period: str, min_live_assets: int = 2, ff_limit: int = 5):
     if not series_map:
         return pd.DataFrame(), [], {
             "requested_floor_start": None,
@@ -2271,9 +2272,9 @@ def load_single_close(ticker, period):
     s = _download_with_fallbacks(ticker, get_period_metadata(period)["yf_period"])
     return s
 
-@st.cache_data(ttl=3600, max_entries=100, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=80, show_spinner=False)
 def load_benchmark_series_bulk(tickers_tuple, period: str):
-    cached = _load_close_prices_cached(tuple(tickers_tuple), period, cache_key=hashlib.sha256(f"{'|'.join(tickers_tuple)}|{period}|bench".encode('utf-8')).hexdigest())
+    cached = _load_close_prices_cached(tuple(tickers_tuple), period, price_cache_key=build_price_cache_key(tickers_tuple, period))
     return cached.get("series_map", {})
 
 def compute_metrics(equity: pd.Series):
@@ -2742,9 +2743,9 @@ def compute_ai_overlay_scores(prices: pd.DataFrame, component_scores: dict, lang
     return overlay, explanations
 
 
-@st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
-def compute_regime_and_scores_cached(_prices: pd.DataFrame, period: str, lang: str, vol_penalty: float, cache_key: str = ""):
-    # OPTIMIERUNG v12: stabilerer Cache-Key, DataFrame selbst wird bewusst aus dem Hash ausgeschlossen
+@st.cache_data(ttl=3600, max_entries=80, show_spinner=False)
+def compute_regime_and_scores_cached(_prices: pd.DataFrame, period: str, lang: str, vol_penalty: float, strategy_cache_key: str = ""):
+    # OPTIMIERUNG v14: separater Strategie-Cache für Regime und Scores mit langlebigerem Key
     regime_df, _ = compute_market_regime(_prices, period, lang)
     component_scores = compute_component_score_table(_prices, regime_df, vol_penalty)
     ai_overlay_scores, ai_explanations = compute_ai_overlay_scores(_prices, component_scores, lang)
@@ -2913,10 +2914,10 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
         "refined_scores": refined_score_today,
     }
 
-@st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
-def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, min_cash_reserve_pct: int = 5, score_override_threshold: int = 85, top_n: int = 8, simulate_taxes_de: bool = False, benchmark_tickers: tuple = (), weight_chart_top_n_value: int = 20, enable_ki_explanations_flag: bool = False, use_regime_filter_flag: bool = False, alignment_info: dict | None = None, cache_key: str = ""):
-    # OPTIMIERUNG v12: stabilerer Cache-Key, Preispanel selbst wird aus dem Streamlit-Hash ausgeschlossen
-    prices = sanitize_price_panel(_prices.sort_index().copy())
+@st.cache_data(ttl=3600, max_entries=80, show_spinner=False)
+def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, min_cash_reserve_pct: int = 5, score_override_threshold: int = 85, top_n: int = 8, simulate_taxes_de: bool = False, benchmark_tickers: tuple = (), weight_chart_top_n_value: int = 20, enable_ki_explanations_flag: bool = False, use_regime_filter_flag: bool = False, alignment_info: dict | None = None, strategy_cache_key: str = ""):
+    # OPTIMIERUNG v14: langlebigerer Simulations-Cache mit getrenntem strategy_cache_key
+    prices = sanitize_price_panel(_prices.sort_index())
     tickers = list(prices.columns)
     effective_top_n = min(top_n, len(tickers))
     max_weight_pct = int(np.clip(max_weight_pct, 1, 50))
@@ -2934,26 +2935,27 @@ def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_
     bot_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
     bh_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
 
-    regime_cache_key = build_prices_cache_key(prices, period, lang, vol_penalty, "regime")
-    regime_df, component_scores, ai_overlay_scores, ai_explanations, total_score = compute_regime_and_scores_cached(_prices=prices, period=period, lang=lang, vol_penalty=vol_penalty, cache_key=regime_cache_key)
+    regime_cache_key = build_strategy_cache_key(prices, period, lang, vol_penalty, "regime")
+    regime_df, component_scores, ai_overlay_scores, ai_explanations, total_score = compute_regime_and_scores_cached(_prices=prices, period=period, lang=lang, vol_penalty=vol_penalty, strategy_cache_key=regime_cache_key)
 
     row_valid_assets = total_score.notna().sum(axis=1)
     valid_mask = row_valid_assets >= 2
-    prices = prices.loc[valid_mask].copy()
-    regime_df = regime_df.loc[valid_mask].copy()
-    total_score = total_score.loc[valid_mask].copy()
+    prices = prices.loc[valid_mask]
+    regime_df = regime_df.loc[valid_mask]
+    total_score = total_score.loc[valid_mask]
     for key in ["trend", "momentum", "quality", "risk", "regime_fit", "sma50", "sma200", "vol_63", "ret_21", "ret_63", "ret_126", "ret_252"]:
-        component_scores[key] = component_scores[key].loc[valid_mask].copy()
+        component_scores[key] = component_scores[key].loc[valid_mask]
 
     dates = prices.index
     if len(dates) < 30:
         raise ValueError("too_few_rows")
 
-    valuation_prices = prices.ffill(limit=7).copy()
+    # OPTIMIERUNG v14: günstigere Auffüllung mit kleinerem Limit und weniger Kopien
+    valuation_prices = prices.ffill(limit=5)
     portfolio_cap = safe_portfolio_cap(initial_capital, monthly_savings, len(dates))
 
-    price_matrix = valuation_prices.to_numpy(dtype=float)
-    tradable_matrix = prices.to_numpy(dtype=float)
+    price_matrix = np.nan_to_num(valuation_prices.to_numpy(dtype=float), nan=np.nan, posinf=np.nan, neginf=np.nan)
+    tradable_matrix = np.nan_to_num(prices.to_numpy(dtype=float), nan=np.nan, posinf=np.nan, neginf=np.nan)
     valid_price_mask = np.isfinite(price_matrix) & (price_matrix > 0)
     valid_tradable_mask = np.isfinite(tradable_matrix) & (tradable_matrix > 0)
     live_counts = np.sum(valid_tradable_mask, axis=1)
@@ -4588,7 +4590,7 @@ weight_chart_top_n = st.sidebar.slider(
     help=T["weight_chart_top_n_help"],
 )
 
-# OPTIMIERUNG v12: schnelle Vorschau für große Körbe mit automatischer Aktivierung ab 30 Assets
+# OPTIMIERUNG v13: schnelle Vorschau für große Körbe mit automatischer Aktivierung ab 30 Assets
 fast_preview = st.sidebar.checkbox(
     T["fast_preview"],
     key="fast_preview",
@@ -4614,18 +4616,18 @@ save_logged_in_user_state()
 if can_use_asset_search():
     st.sidebar.subheader(T["asset_search_section"])
 
-    # OPTIMIERUNG v12: Premium Live-Suchleiste mit Multi-Select und klaren Add-Buttons
+    # OPTIMIERUNG v13: klassische, elegante Live-Suchleiste ohne Multi-Select oder Sammelbuttons
     with st.sidebar.expander("✨ Smart Asset Search", expanded=True):
         st.markdown(
             """
-            <div style="padding:0.95rem 1rem;border-radius:18px;background:linear-gradient(135deg, rgba(15,23,42,0.98) 0%, rgba(30,41,59,0.98) 100%);border:1px solid rgba(255,255,255,0.08);box-shadow:0 10px 28px rgba(0,0,0,0.22);margin-bottom:0.7rem;">
+            <div style="padding:1rem 1rem 0.9rem 1rem;border-radius:18px;background:linear-gradient(135deg, rgba(15,23,42,0.98) 0%, rgba(30,41,59,0.98) 100%);border:1px solid rgba(255,255,255,0.08);box-shadow:0 10px 28px rgba(0,0,0,0.22);margin-bottom:0.65rem;">
                 <div style="font-size:0.78rem;letter-spacing:0.10em;text-transform:uppercase;color:rgba(147,197,253,0.95);font-weight:800;">Live Search</div>
-                <div style="font-size:0.98rem;color:rgba(248,250,252,0.90);line-height:1.45;margin-top:0.30rem;">Suche blitzschnell nach Ticker, Name, ISIN oder WKN – die Trefferliste klappt direkt unter dem Feld auf.</div>
+                <div style="font-size:0.98rem;color:rgba(248,250,252,0.90);line-height:1.45;margin-top:0.30rem;">Suche nach Ticker, Name, ISIN oder WKN – die Trefferliste klappt direkt darunter auf.</div>
             </div>
             """ if lang == "DE" else """
-            <div style="padding:0.95rem 1rem;border-radius:18px;background:linear-gradient(135deg, rgba(15,23,42,0.98) 0%, rgba(30,41,59,0.98) 100%);border:1px solid rgba(255,255,255,0.08);box-shadow:0 10px 28px rgba(0,0,0,0.22);margin-bottom:0.7rem;">
+            <div style="padding:1rem 1rem 0.9rem 1rem;border-radius:18px;background:linear-gradient(135deg, rgba(15,23,42,0.98) 0%, rgba(30,41,59,0.98) 100%);border:1px solid rgba(255,255,255,0.08);box-shadow:0 10px 28px rgba(0,0,0,0.22);margin-bottom:0.65rem;">
                 <div style="font-size:0.78rem;letter-spacing:0.10em;text-transform:uppercase;color:rgba(147,197,253,0.95);font-weight:800;">Live Search</div>
-                <div style="font-size:0.98rem;color:rgba(248,250,252,0.90);line-height:1.45;margin-top:0.30rem;">Search instantly by ticker, name, ISIN or WKN – results expand elegantly right below the field.</div>
+                <div style="font-size:0.98rem;color:rgba(248,250,252,0.90);line-height:1.45;margin-top:0.30rem;">Search by ticker, name, ISIN or WKN – results expand right below the field.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -4635,98 +4637,49 @@ if can_use_asset_search():
             T["asset_search_query"],
             key="asset_search_query",
             help=T["asset_search_query_help"],
-            placeholder=("NVDA, SAP, DE0007164600, 716460 ..." if lang == "DE" else "NVDA, SAP, DE0007164600, 716460 ..."),
+            placeholder=("Apple, AAPL, US0378331005, 865985 ..." if lang == "DE" else "Apple, AAPL, US0378331005, 865985 ..."),
         )
 
         filtered_assets = filter_asset_catalog(search_query)
-        if filtered_assets.empty:
-            st.info(T["search_no_results"])
+        show_dropdown = bool(str(search_query).strip())
+
+        if show_dropdown:
+            if filtered_assets.empty:
+                st.info(T["search_no_results"])
+            else:
+                st.markdown(
+                    """
+                    <div style="margin-top:0.15rem;margin-bottom:0.35rem;padding:0.35rem 0.15rem 0.15rem 0.15rem;border-radius:18px;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);">
+                    """,
+                    unsafe_allow_html=True,
+                )
+                for _, row in filtered_assets.iterrows():
+                    info_col, action_col = st.columns([5.3, 1.7], gap="small")
+                    with info_col:
+                        st.markdown(
+                            f"""
+                            <div style="padding:0.82rem 0.92rem;border-radius:16px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);margin:0.10rem 0 0.22rem 0;">
+                                <div style="font-weight:800;font-size:0.97rem;color:#f8fafc;line-height:1.2;">{row['ticker']} · {row['name']}</div>
+                                <div style="font-size:0.77rem;color:rgba(248,250,252,0.62);margin-top:0.24rem;">ISIN: {row['isin']} · WKN: {row['wkn']}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                    with action_col:
+                        if st.button(
+                            "＋ Hinzufügen" if lang == "DE" else "＋ Add",
+                            key=f"quick_add_v13_{row['ticker']}",
+                            use_container_width=True,
+                            help=(f"{row['ticker']} direkt zum Korb hinzufügen" if lang == "DE" else f"Add {row['ticker']} directly to basket"),
+                        ):
+                            add_ticker_to_basket(row["ticker"])
+                            save_active_basket_to_state()
+                            save_logged_in_user_state()
+                            st.success(T["added_asset_msg"].format(ticker=row["ticker"]))
+                            st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
         else:
-            filtered_assets = filtered_assets.copy()
-            filtered_assets["display"] = filtered_assets.apply(lambda row: format_search_option(row, T), axis=1)
-            filtered_assets["headline"] = filtered_assets.apply(lambda row: f"{row['ticker']} · {row['name']}", axis=1)
-            filtered_assets["subline"] = filtered_assets.apply(lambda row: f"ISIN: {row['isin']} · WKN: {row['wkn']}", axis=1)
-
-            valid_display_options = filtered_assets["display"].tolist()
-            previous_selected = st.session_state.get("asset_search_select", [])
-            if not isinstance(previous_selected, (list, tuple, set)):
-                previous_selected = []
-            previous_selected = [str(x) for x in previous_selected if str(x) in valid_display_options]
-
-            selected_displays = st.multiselect(
-                "Multi-Select",
-                options=valid_display_options,
-                default=previous_selected,
-                key="asset_search_select_widget",
-                help=T["search_info"],
-                label_visibility="collapsed",
-                placeholder=("Mehrere Assets markieren …" if lang == "DE" else "Select multiple assets …"),
-            )
-            st.session_state["asset_search_select"] = list(selected_displays)
-
-            st.caption(
-                (f"{len(filtered_assets)} Treffer · {len(selected_displays)} markiert" if lang == "DE" else f"{len(filtered_assets)} results · {len(selected_displays)} selected")
-            )
-
-            st.markdown("<div style='margin-top:0.15rem;'></div>", unsafe_allow_html=True)
-            for _, row in filtered_assets.iterrows():
-                is_selected = row["display"] in selected_displays
-                row_bg = "rgba(59,130,246,0.10)" if is_selected else "rgba(255,255,255,0.035)"
-                row_border = "rgba(96,165,250,0.34)" if is_selected else "rgba(255,255,255,0.07)"
-                info_col, action_col = st.columns([5.6, 1.7], gap="small")
-                with info_col:
-                    st.markdown(
-                        f"""
-                        <div style="padding:0.78rem 0.9rem;border-radius:16px;background:{row_bg};border:1px solid {row_border};margin:0.12rem 0 0.22rem 0;transition:all .2s ease;">
-                            <div style="font-weight:800;font-size:0.96rem;color:#f8fafc;line-height:1.2;">{row['headline']}</div>
-                            <div style="font-size:0.77rem;color:rgba(248,250,252,0.62);margin-top:0.22rem;">{row['subline']}</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                with action_col:
-                    if st.button(
-                        "＋ Hinzufügen" if lang == "DE" else "＋ Add",
-                        key=f"quick_add_v12_{row['ticker']}",
-                        use_container_width=True,
-                        help=(f"{row['ticker']} direkt zum Korb hinzufügen" if lang == "DE" else f"Add {row['ticker']} directly to basket"),
-                    ):
-                        add_ticker_to_basket(row["ticker"])
-                        save_active_basket_to_state()
-                        save_logged_in_user_state()
-                        st.success(T["added_asset_msg"].format(ticker=row["ticker"]))
-                        st.rerun()
-
-            add_cols = st.columns([1, 1], gap="small")
-            if add_cols[0].button(
-                "＋ Alle ausgewählten hinzufügen" if lang == "DE" else "＋ Add selected",
-                use_container_width=True,
-                type="secondary",
-                key="add_selected_visible_assets_btn",
-            ):
-                selected_tickers = filtered_assets.loc[filtered_assets["display"].isin(selected_displays), "ticker"].tolist()
-                if selected_tickers:
-                    add_multiple_tickers_to_basket(selected_tickers)
-                    save_active_basket_to_state()
-                    save_logged_in_user_state()
-                    st.success(T["added_all_assets_msg"].format(count=len(selected_tickers)))
-                    st.rerun()
-
-            if add_cols[1].button(
-                "Alle sichtbaren hinzufügen" if lang == "DE" else "Add all visible",
-                use_container_width=True,
-                type="primary",
-                key="add_all_visible_assets_btn",
-            ):
-                all_visible = filtered_assets["ticker"].tolist()
-                if all_visible:
-                    add_multiple_tickers_to_basket(all_visible)
-                    save_active_basket_to_state()
-                    save_logged_in_user_state()
-                    st.success(T["added_all_assets_msg"].format(count=len(all_visible)))
-                    st.rerun()
-
-        st.caption(T["search_info"])
+            st.caption(T["search_info"])
 else:
     st.sidebar.subheader(T["asset_search_section"])
     st.sidebar.caption(T["search_locked"])
@@ -4844,18 +4797,18 @@ if calculate_clicked:
 
         effective_period = period
         effective_top_n = int(top_n)
-        # OPTIMIERUNG v12: Fast Preview greift automatisch bei großen Körben und kappt auf 5y + Top-N <= 6
-        auto_fast_preview = len(tickers) >= 30
+        # OPTIMIERUNG v14: intelligenter Fast-Preview-Modus ab 35 Assets mit klarerem Hinweis
+        auto_fast_preview = len(tickers) >= 35
         effective_fast_preview = bool(st.session_state.get("fast_preview", False)) or auto_fast_preview
-        if effective_fast_preview and len(tickers) >= 30:
+        if effective_fast_preview and len(tickers) >= 35:
             effective_period = "5y"
-            effective_top_n = min(int(top_n), 6)
+            effective_top_n = min(int(top_n), 8)
         elif effective_fast_preview:
             if period not in {"1y", "2y", "3y", "5y"}:
                 effective_period = "5y"
-            effective_top_n = min(int(top_n), 6)
+            effective_top_n = min(int(top_n), 8)
         if auto_fast_preview and not bool(st.session_state.get("fast_preview", False)):
-            st.info("⚡ Fast Preview wurde für diesen großen Korb automatisch aktiviert (5 Jahre / Top-N max. 6)." if lang == "DE" else "⚡ Fast Preview was activated automatically for this large basket (5 years / Top-N max. 6).")
+            st.info("⚡ Fast Preview aktiviert – für maximale Geschwindigkeit (5 Jahre / Top-N max. 8)." if lang == "DE" else "⚡ Fast Preview activated – for maximum speed (5 years / Top-N max. 8).")
 
         # Witzige & unterhaltsame Fortschrittsmeldungen
         load_progress.progress(0.10, text="Der Bot trinkt gerade seinen Morgenkaffee ☕ und schaut die Charts an...")
@@ -4863,7 +4816,7 @@ if calculate_clicked:
             tickers, effective_period, progress_bar=load_progress, status_box=load_status
         )
 
-        load_progress.progress(0.35, text="Der Bot pumpt gerade seine KI-Muskeln und berechnet Regime... 🏋️")
+        load_progress.progress(0.35, text="Berechne Regime… Der Bot pumpt gerade seine KI-Muskeln 🏋️")
         for skipped in skipped_tickers:
             st.warning(T["warning_skip"].format(ticker=skipped))
         for partial_ticker in partial_history_tickers:
@@ -4911,7 +4864,7 @@ if calculate_clicked:
             st.stop()
 
         load_progress.progress(0.78, text="Regime-Engine läuft heiß... Bull oder Bear? Der Bot entscheidet gerade ⚔️")
-        load_progress.progress(0.93, text="Equity wird stabilisiert... Der Bot macht gerade Yoga mit den Kurven 🧘")
+        load_progress.progress(0.93, text="Stabilisiere Equity… Der Bot macht gerade Yoga mit den Kurven 🧘")
 
         try:
             context = simulate_allocato_v2(
@@ -4940,7 +4893,7 @@ if calculate_clicked:
                 weight_chart_top_n_value=int(weight_chart_top_n),
                 enable_ki_explanations_flag=bool(enable_ki_explanations),
                 use_regime_filter_flag=bool(use_regime_filter),
-                cache_key=build_prices_cache_key(prices, effective_period, lang, initial_capital, monthly_savings, rebalance_freq, fee_pct, min_score, max_weight_pct, vol_penalty, cash_interest_pct, conviction_power, soft_cash_mode, target_cash_floor_pct, target_cash_ceiling_pct, soft_cash_invest_ratio_pct, min_cash_reserve_pct, score_override_threshold, effective_top_n, simulate_taxes_de, tuple(get_benchmark_list()), weight_chart_top_n, enable_ki_explanations, use_regime_filter, st.session_state.get("fast_preview", False), "simulate"),
+                strategy_cache_key=build_strategy_cache_key(prices, effective_period, lang, initial_capital, monthly_savings, rebalance_freq, fee_pct, min_score, max_weight_pct, vol_penalty, cash_interest_pct, conviction_power, soft_cash_mode, target_cash_floor_pct, target_cash_ceiling_pct, soft_cash_invest_ratio_pct, min_cash_reserve_pct, score_override_threshold, effective_top_n, simulate_taxes_de, tuple(get_benchmark_list()), weight_chart_top_n, enable_ki_explanations, use_regime_filter, st.session_state.get("fast_preview", False), "simulate"),
                 alignment_info=alignment_info,
             )
         except ValueError:
