@@ -649,6 +649,7 @@ defaults = {
     "benchmark_etfs_input": "SPY\nQQQ",
     "simulate_taxes_de": False,
     "enable_ki_explanations": False,
+    "fast_preview": False,
 }
 
 for k, v in defaults.items():
@@ -722,6 +723,7 @@ PERSISTENT_STATE_KEYS = [
     "benchmark_etfs_input",
     "simulate_taxes_de",
     "enable_ki_explanations",
+    "fast_preview",
     "subscription_expires_at",
     "_pending_preset",
     "baskets",
@@ -1061,6 +1063,8 @@ TRANSLATIONS = {
         "cash_ceiling_help": "Der Bot versucht, im Normalfall nicht deutlich mehr Cash zu halten.",
         "soft_cash_ratio": "Soft-Cash Investitionsquote (%)",
         "soft_cash_ratio_help": "Wenn Soft Cash Mode aktiv ist und keine starken Signale da sind, bleibt ungefähr dieser Anteil investiert.",
+        "fast_preview": "Fast Preview aktivieren",
+        "fast_preview_help": "Für schnelle Tests wird der Zeitraum automatisch auf maximal 5 Jahre begrenzt und Top-N bei Bedarf leicht reduziert.",
         "min_cash_reserve": "Mindest-Cash-Reserve (%)",
         "min_cash_reserve_help": "Diese Cash-Reserve bleibt standardmäßig erhalten. Nur bei außergewöhnlich starken Signalen darf sie temporär unterschritten werden.",
         "score_override_threshold": "Override-Schwelle für Cash-Reserve (%)",
@@ -1383,6 +1387,8 @@ TRANSLATIONS = {
         "cash_ceiling_help": "The bot tries not to keep significantly more cash than this under normal conditions.",
         "soft_cash_ratio": "Soft cash investment ratio (%)",
         "soft_cash_ratio_help": "If soft cash mode is active and there are no strong signals, roughly this share remains invested.",
+        "fast_preview": "Enable Fast Preview",
+        "fast_preview_help": "For quicker tests the period is capped at 5 years and Top-N is reduced slightly when helpful.",
         "min_cash_reserve": "Minimum cash reserve (%)",
         "min_cash_reserve_help": "This reserve is kept by default. Only exceptionally strong signals may temporarily break below it.",
         "score_override_threshold": "Cash-reserve override threshold (%)",
@@ -1996,6 +2002,20 @@ def safe_portfolio_cap(initial_capital: float, monthly_savings: float, periods: 
     realistic_cap = max(total_contrib * 250.0, 10_000_000.0)
     return realistic_cap
 
+# OPTIMIERUNG v10: leichte, stabile Cache-Keys für große Simulationen
+def build_prices_cache_key(prices: pd.DataFrame, period: str, *parts) -> str:
+    if prices is None or prices.empty:
+        base = f"empty|{period}"
+    else:
+        start = str(prices.index.min())
+        end = str(prices.index.max())
+        cols = "|".join(map(str, prices.columns))
+        shape = f"{prices.shape[0]}x{prices.shape[1]}"
+        checksum = f"{float(pd.to_numeric(prices.iloc[-1], errors='coerce').fillna(0.0).sum()):.6f}"
+        base = f"{period}|{shape}|{start}|{end}|{cols}|{checksum}"
+    extra = "|".join(map(str, parts))
+    return hashlib.sha256(f"{base}|{extra}".encode("utf-8")).hexdigest()
+
 
 def _safe_series_history_stats(series_map: dict) -> pd.DataFrame:
     rows = []
@@ -2072,6 +2092,7 @@ def _split_bulk_close_panel(raw: pd.DataFrame, tickers: list[str]) -> dict:
 
 
 def _bulk_download_once(tickers: list[str], period: str, auto_adjust: bool) -> dict:
+    # OPTIMIERUNG v10: ein einzelner Bulk-yfinance-Call statt Einzelabrufe
     if not tickers:
         return {}
     try:
@@ -2146,6 +2167,7 @@ def _load_close_prices_cached(tickers_tuple, period: str):
 
 
 def load_close_prices(tickers, period, progress_bar=None, status_box=None):
+    # OPTIMIERUNG v10: kompletter Bulk-yfinance-Download über den gecachten Sammelabruf
     tickers = [str(t).strip() for t in tickers if str(t).strip()]
     total = max(len(tickers), 1)
 
@@ -2636,15 +2658,17 @@ def get_regime_profile(regime_code: str) -> dict:
     return profiles.get(regime_code, profiles["TRANSITION"])
 
 def compute_component_score_table(prices: pd.DataFrame, regime_df: pd.DataFrame, vol_penalty: float) -> dict:
+    # OPTIMIERUNG v10: stärker vektorisierte Score-Bausteine für große Körbe
     ret_21 = prices / prices.shift(21) - 1.0
     ret_63 = prices / prices.shift(63) - 1.0
     ret_126 = prices / prices.shift(126) - 1.0
     ret_252 = prices / prices.shift(252) - 1.0
     sma50 = prices.rolling(50, min_periods=20).mean()
     sma200 = prices.rolling(200, min_periods=60).mean()
-    vol_63 = prices.pct_change().rolling(63, min_periods=20).std() * np.sqrt(252)
+    pct_change = prices.pct_change()
+    vol_63 = pct_change.rolling(63, min_periods=20).std() * np.sqrt(252)
     dd_126 = prices / prices.rolling(126, min_periods=30).max() - 1.0
-    pos_days_63 = (prices.pct_change() > 0).rolling(63, min_periods=20).mean()
+    pos_days_63 = (pct_change > 0).rolling(63, min_periods=20).mean()
 
     trend_raw = 0.45 * ((prices / sma50) - 1.0) + 0.55 * ((prices / sma200) - 1.0)
     momentum_raw = 0.20 * ret_21 + 0.35 * ret_63 + 0.30 * ret_126 + 0.15 * ret_252
@@ -2658,18 +2682,20 @@ def compute_component_score_table(prices: pd.DataFrame, regime_df: pd.DataFrame,
     quality_score = quality_raw.rank(axis=1, pct=True) * 100
     risk_score = risk_raw.rank(axis=1, pct=True) * 100
 
-    regime_fit_score = pd.DataFrame(index=prices.index, columns=prices.columns, dtype=float)
-    for dt in prices.index:
-        regime_code = regime_df.loc[dt, "regime_code"]
-        if regime_code == "BULL":
-            fit_raw = 0.60 * momentum_raw.loc[dt] + 0.40 * trend_raw.loc[dt]
-        elif regime_code == "BEAR":
-            fit_raw = 0.60 * risk_raw.loc[dt] + 0.40 * quality_raw.loc[dt]
-        elif regime_code == "RECOVERY":
-            fit_raw = 0.50 * trend_raw.loc[dt] + 0.30 * momentum_raw.loc[dt] + 0.20 * quality_raw.loc[dt]
-        else:
-            fit_raw = 0.40 * quality_raw.loc[dt] + 0.30 * momentum_raw.loc[dt] + 0.30 * risk_raw.loc[dt]
-        regime_fit_score.loc[dt] = _safe_pct_rank(fit_raw)
+    bull_fit = 0.60 * momentum_raw + 0.40 * trend_raw
+    bear_fit = 0.60 * risk_raw + 0.40 * quality_raw
+    recovery_fit = 0.50 * trend_raw + 0.30 * momentum_raw + 0.20 * quality_raw
+    transition_fit = 0.40 * quality_raw + 0.30 * momentum_raw + 0.30 * risk_raw
+
+    regime_codes = regime_df["regime_code"].reindex(prices.index).fillna("TRANSITION")
+    regime_fit_raw = transition_fit.copy()
+    bull_mask = regime_codes.eq("BULL")
+    bear_mask = regime_codes.eq("BEAR")
+    recovery_mask = regime_codes.eq("RECOVERY")
+    regime_fit_raw.loc[bull_mask] = bull_fit.loc[bull_mask]
+    regime_fit_raw.loc[bear_mask] = bear_fit.loc[bear_mask]
+    regime_fit_raw.loc[recovery_mask] = recovery_fit.loc[recovery_mask]
+    regime_fit_score = regime_fit_raw.rank(axis=1, pct=True) * 100
 
     return {
         "trend": clamp_series(trend_score.stack()).unstack(),
@@ -2726,12 +2752,12 @@ def compute_ai_overlay_scores(prices: pd.DataFrame, component_scores: dict, lang
 
 
 @st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
-def compute_regime_and_scores_cached(prices: pd.DataFrame, period: str, lang: str, vol_penalty: float):
-    # Interne Hilfsfunktion aufrufen (kein rekursiver Cache-Aufruf mehr)
-    regime_df, _ = compute_market_regime(prices, period, lang)
-    component_scores = compute_component_score_table(prices, regime_df, vol_penalty)
-    ai_overlay_scores, ai_explanations = compute_ai_overlay_scores(prices, component_scores, lang)
-    total_score = compute_total_score_by_regime(prices, regime_df, component_scores, ai_overlay_scores)
+def compute_regime_and_scores_cached(_prices: pd.DataFrame, period: str, lang: str, vol_penalty: float, cache_key: str = ""):
+    # OPTIMIERUNG v10: stabilerer Cache-Key, DataFrame selbst wird bewusst aus dem Hash ausgeschlossen
+    regime_df, _ = compute_market_regime(_prices, period, lang)
+    component_scores = compute_component_score_table(_prices, regime_df, vol_penalty)
+    ai_overlay_scores, ai_explanations = compute_ai_overlay_scores(_prices, component_scores, lang)
+    total_score = compute_total_score_by_regime(_prices, regime_df, component_scores, ai_overlay_scores)
     return regime_df, component_scores, ai_overlay_scores, ai_explanations, total_score
 
 
@@ -2897,8 +2923,9 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
     }
 
 @st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
-def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, min_cash_reserve_pct: int = 5, score_override_threshold: int = 85, top_n: int = 8, simulate_taxes_de: bool = False, benchmark_tickers: tuple = (), weight_chart_top_n_value: int = 20, enable_ki_explanations_flag: bool = False, use_regime_filter_flag: bool = False, alignment_info: dict | None = None):
-    prices = sanitize_price_panel(prices.sort_index().copy())
+def simulate_allocato_v2(_prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, min_cash_reserve_pct: int = 5, score_override_threshold: int = 85, top_n: int = 8, simulate_taxes_de: bool = False, benchmark_tickers: tuple = (), weight_chart_top_n_value: int = 20, enable_ki_explanations_flag: bool = False, use_regime_filter_flag: bool = False, alignment_info: dict | None = None, cache_key: str = ""):
+    # OPTIMIERUNG v10: stabilerer Cache-Key, Preispanel selbst wird aus dem Streamlit-Hash ausgeschlossen
+    prices = sanitize_price_panel(_prices.sort_index().copy())
     tickers = list(prices.columns)
     effective_top_n = min(top_n, len(tickers))
     max_weight_pct = int(np.clip(max_weight_pct, 1, 50))
@@ -2916,7 +2943,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     bot_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
     bh_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
 
-    regime_df, component_scores, ai_overlay_scores, ai_explanations, total_score = compute_regime_and_scores_cached(prices, period, lang, vol_penalty)
+    regime_cache_key = build_prices_cache_key(prices, period, lang, vol_penalty, "regime")
+    regime_df, component_scores, ai_overlay_scores, ai_explanations, total_score = compute_regime_and_scores_cached(_prices=prices, period=period, lang=lang, vol_penalty=vol_penalty, cache_key=regime_cache_key)
 
     row_valid_assets = total_score.notna().sum(axis=1)
     valid_mask = row_valid_assets >= 2
@@ -2991,6 +3019,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
 
         regime_code_today = regime_df.loc[date, "regime_code"]
         scheduled_rebalance = i == 0 or (prev_date is not None and is_rebalance_day(date, prev_date, rebalance_freq))
+        # OPTIMIERUNG v10: Zielportfolio nur bei Rebalancing, Erstinitialisierung oder Regimewechsel neu bestimmen
         need_fresh_strategy = scheduled_rebalance or (cached_strategy_payload is None) or (regime_code_today != last_regime_code)
 
         if need_fresh_strategy:
@@ -4002,6 +4031,11 @@ st.markdown(
     [data-testid="stDataFrame"] div[role="gridcell"] {
         white-space: normal !important;
         word-break: break-word !important;
+        line-height: 1.25 !important;
+    }
+    [data-testid="stDataFrame"] div[role="gridcell"] {
+        white-space: normal !important;
+        word-break: break-word !important;
     }
     @keyframes floatFade {
         from { opacity: 0; transform: translateY(6px); }
@@ -4563,6 +4597,13 @@ weight_chart_top_n = st.sidebar.slider(
     help=T["weight_chart_top_n_help"],
 )
 
+# OPTIMIERUNG v10: schnelle Vorschau für große Körbe
+fast_preview = st.sidebar.checkbox(
+    T["fast_preview"],
+    key="fast_preview",
+    help=T["fast_preview_help"],
+)
+
 st.sidebar.subheader(T["recommended_setups"])
 col_a, col_b = st.sidebar.columns(2)
 col_a.button(T["preset_quality"], on_click=queue_preset, args=("Quality",))
@@ -4789,10 +4830,17 @@ if calculate_clicked:
         load_progress = st.progress(0)
         load_status = st.empty()
 
+        effective_period = period
+        effective_top_n = int(top_n)
+        if bool(st.session_state.get("fast_preview", False)):
+            if period not in {"1y", "2y", "3y", "5y"}:
+                effective_period = "5y"
+            effective_top_n = min(int(top_n), 6)
+
         # Witzige & unterhaltsame Fortschrittsmeldungen
         load_progress.progress(0.10, text="Der Bot trinkt gerade seinen Morgenkaffee ☕ und schaut die Charts an...")
         series_map, skipped_tickers, partial_history_tickers = load_close_prices(
-            tickers, period, progress_bar=load_progress, status_box=load_status
+            tickers, effective_period, progress_bar=load_progress, status_box=load_status
         )
 
         load_progress.progress(0.35, text="Der Bot pumpt gerade seine KI-Muskeln und berechnet Regime... 🏋️")
@@ -4802,7 +4850,7 @@ if calculate_clicked:
             st.info(T["warning_partial_history"].format(ticker=partial_ticker))
 
         load_progress.progress(0.55, text="Jetzt wird die Historie sauber gemacht... Der Bot hasst Datenlücken 😤")
-        prices, dropped_after_align, alignment_info = align_price_series(series_map, period)
+        prices, dropped_after_align, alignment_info = align_price_series(series_map, effective_period)
         if dropped_after_align:
             st.info(T["warning_align_reduced"])
         for skipped in dropped_after_align:
@@ -4847,8 +4895,8 @@ if calculate_clicked:
 
         try:
             context = simulate_allocato_v2(
-                prices=prices,
-                period=period,
+                _prices=prices,
+                period=effective_period,
                 lang=lang,
                 initial_capital=float(initial_capital),
                 monthly_savings=float(monthly_savings),
@@ -4866,12 +4914,13 @@ if calculate_clicked:
                 soft_cash_invest_ratio_pct=int(soft_cash_invest_ratio_pct),
                 min_cash_reserve_pct=int(min_cash_reserve_pct),
                 score_override_threshold=int(score_override_threshold),
-                top_n=int(top_n),
+                top_n=int(effective_top_n),
                 simulate_taxes_de=bool(simulate_taxes_de),
                 benchmark_tickers=tuple(get_benchmark_list()),
                 weight_chart_top_n_value=int(weight_chart_top_n),
                 enable_ki_explanations_flag=bool(enable_ki_explanations),
                 use_regime_filter_flag=bool(use_regime_filter),
+                cache_key=build_prices_cache_key(prices, effective_period, lang, initial_capital, monthly_savings, rebalance_freq, fee_pct, min_score, max_weight_pct, vol_penalty, cash_interest_pct, conviction_power, soft_cash_mode, target_cash_floor_pct, target_cash_ceiling_pct, soft_cash_invest_ratio_pct, min_cash_reserve_pct, score_override_threshold, effective_top_n, simulate_taxes_de, tuple(get_benchmark_list()), weight_chart_top_n, enable_ki_explanations, use_regime_filter, st.session_state.get("fast_preview", False), "simulate"),
                 alignment_info=alignment_info,
             )
         except ValueError:
