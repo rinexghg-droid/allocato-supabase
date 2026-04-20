@@ -639,7 +639,9 @@ defaults = {
     "target_cash_floor_pct": 2,
     "target_cash_ceiling_pct": 8,
     "soft_cash_invest_ratio_pct": 98,
-    "weight_chart_top_n": 8,
+    "min_cash_reserve_pct": 5,
+    "score_override_threshold": 85,
+    "weight_chart_top_n": 20,
     "top_n": 8,
     "assets_input": "AAPL\nSAP.DE\nSIE.DE\nALV.DE\nMUV2.DE\nJNJ\nPG",
     "asset_search_query": "",
@@ -710,6 +712,8 @@ PERSISTENT_STATE_KEYS = [
     "target_cash_floor_pct",
     "target_cash_ceiling_pct",
     "soft_cash_invest_ratio_pct",
+    "min_cash_reserve_pct",
+    "score_override_threshold",
     "weight_chart_top_n",
     "top_n",
     "assets_input",
@@ -1057,9 +1061,21 @@ TRANSLATIONS = {
         "cash_ceiling_help": "Der Bot versucht, im Normalfall nicht deutlich mehr Cash zu halten.",
         "soft_cash_ratio": "Soft-Cash Investitionsquote (%)",
         "soft_cash_ratio_help": "Wenn Soft Cash Mode aktiv ist und keine starken Signale da sind, bleibt ungefähr dieser Anteil investiert.",
+        "min_cash_reserve": "Mindest-Cash-Reserve (%)",
+        "min_cash_reserve_help": "Diese Cash-Reserve bleibt standardmäßig erhalten. Nur bei außergewöhnlich starken Signalen darf sie temporär unterschritten werden.",
+        "score_override_threshold": "Override-Schwelle für Cash-Reserve (%)",
+        "score_override_threshold_help": "Ab diesem Score darf der Bot die Mindest-Cash-Reserve für absolute Top-Gelegenheiten teilweise unterschreiten.",
         "visualization": "Visualisierung",
         "weight_chart_top_n": "Anzahl Assets im Gewichts-Chart",
         "weight_chart_top_n_help": "Zeigt im Gewichtungsverlauf nur die größten durchschnittlichen Positionen. Der Rest wird zu 'Sonstige' zusammengefasst.",
+        "bot_variants_expander": "🧪 Optimierte Bot-Varianten",
+        "bot_variants_intro": "Zwei direkt nutzbare Varianten für starke Outperformance mit besserer Risikokontrolle.",
+        "variant_name": "Variante",
+        "variant_profile": "Profil",
+        "variant_parameter": "Parameter",
+        "variant_value": "Wert",
+        "variant_reason": "Begründung",
+        "cash_logic_title": "Wie der neue Cash-Reserve-Mechanismus funktioniert",
         "recommended_setups": "⚡ Empfohlene Setups",
         "asset_search_section": "🔎 Asset-Suche",
         "asset_search_query": "Suche nach Ticker, Name, ISIN oder WKN",
@@ -1367,9 +1383,21 @@ TRANSLATIONS = {
         "cash_ceiling_help": "The bot tries not to keep significantly more cash than this under normal conditions.",
         "soft_cash_ratio": "Soft cash investment ratio (%)",
         "soft_cash_ratio_help": "If soft cash mode is active and there are no strong signals, roughly this share remains invested.",
+        "min_cash_reserve": "Minimum cash reserve (%)",
+        "min_cash_reserve_help": "This reserve is kept by default. Only exceptionally strong signals may temporarily break below it.",
+        "score_override_threshold": "Cash-reserve override threshold (%)",
+        "score_override_threshold_help": "Above this score the bot may partially dip below the minimum cash reserve for unusually strong opportunities.",
         "visualization": "Visualization",
         "weight_chart_top_n": "Number of assets in weight chart",
         "weight_chart_top_n_help": "Shows only the largest average positions in the weight history. The rest is grouped into 'Other'.",
+        "bot_variants_expander": "🧪 Optimized bot variants",
+        "bot_variants_intro": "Two ready-to-use variants for strong outperformance with better risk control.",
+        "variant_name": "Variant",
+        "variant_profile": "Profile",
+        "variant_parameter": "Parameter",
+        "variant_value": "Value",
+        "variant_reason": "Why",
+        "cash_logic_title": "How the new cash-reserve mechanism works",
         "recommended_setups": "⚡ Recommended setups",
         "asset_search_section": "🔎 Asset search",
         "asset_search_query": "Search by ticker, name, ISIN or WKN",
@@ -2381,13 +2409,21 @@ def compute_annual_returns(bot_equity: pd.Series, bh_equity: pd.Series, T: dict)
 def style_rebalance_log(df: pd.DataFrame, buys_col: str, sells_col: str):
     def _cell_color(val: str, positive: bool):
         if not isinstance(val, str) or val.strip() in {"", "—"}:
-            return ""
+            return "white-space: normal; word-break: break-word; font-size: 0.82rem;"
         bg = "rgba(34,197,94,0.16)" if positive else "rgba(239,68,68,0.16)"
         border = "#22c55e" if positive else "#ef4444"
         color = "#dcfce7" if positive else "#fee2e2"
-        return f"background-color: {bg}; color: {color}; border-left: 3px solid {border};"
+        return f"background-color: {bg}; color: {color}; border-left: 3px solid {border}; white-space: normal; word-break: break-word; font-size: 0.82rem;"
 
-    styler = df.style
+    wrap_cols = [c for c in [buys_col, sells_col, "Logik", "Logic", "Ausgewählte Assets", "Selected assets", "Buy & Hold Aktion", "Buy & Hold Action"] if c in df.columns]
+    styler = df.style.set_properties(**{
+        "white-space": "normal",
+        "word-break": "break-word",
+        "font-size": "0.82rem",
+        "line-height": "1.2",
+    })
+    if wrap_cols:
+        styler = styler.set_properties(subset=wrap_cols, **{"max-width": "320px"})
     if buys_col in df.columns:
         styler = styler.map(lambda v: _cell_color(v, True), subset=[buys_col])
     if sells_col in df.columns:
@@ -2410,6 +2446,78 @@ def render_net_tax_badge(label: str, value: float, paid_in: float):
     )
 
 
+
+
+BOT_VARIANTS = {
+    "DE": {
+        "Aggressiv": [
+            ("Conviction-Stärke", "2.2", "Konzentriert Gewinner stärker, bleibt aber unter dem alten Extrembereich."),
+            ("Max-Gewicht pro Asset", "24 %", "Begrenzt Klumpenrisiken, ohne starke Trends zu früh abzuwürgen."),
+            ("Volatilitätsstrafe", "0.22", "Bremst nur die wildesten Namen, lässt Momentum aber arbeiten."),
+            ("Mindest-Score", "0.18", "Nur Titel mit solider Gesamtqualität kommen in Frage."),
+            ("Top-N", "6", "Mehr Diversifikation als 4–5, aber weiter fokussiert."),
+            ("Cash-Untergrenze", "3 %", "Ständiges Trockenpulver für neue Setups."),
+            ("Cash-Obergrenze", "10 %", "In starken Regimen bleibt der Bot überwiegend investiert."),
+            ("Soft-Cash-Investitionsquote", "95 %", "Aggressiv, aber nicht komplett bis zum Anschlag."),
+            ("Mindest-Cash-Reserve", "4 %", "Reserve für neue Hochkonviktions-Einstiege."),
+            ("Override-Schwelle", "87 %", "Nur außergewöhnliche Scores dürfen die Reserve anknabbern."),
+        ],
+        "Robust": [
+            ("Conviction-Stärke", "1.6", "Sanftere Konzentration, weniger Drawdown-Spikes."),
+            ("Max-Gewicht pro Asset", "18 %", "Deutlich breiter verteilt, reduziert Einzeltitel-Risiko."),
+            ("Volatilitätsstrafe", "0.42", "Schwankungsreiche Titel werden klarer abgewertet."),
+            ("Mindest-Score", "0.26", "Höhere Eintrittshürde verbessert die Durchschnittsqualität."),
+            ("Top-N", "8", "Breiter, robuster und weniger Meme-lastig."),
+            ("Cash-Untergrenze", "5 %", "Mehr defensive Flexibilität in Übergangsphasen."),
+            ("Cash-Obergrenze", "14 %", "Erlaubt bewusst höhere Kasse in schwierigen Regimen."),
+            ("Soft-Cash-Investitionsquote", "90 %", "Etwas mehr Puffer gegen tiefe Drawdowns."),
+            ("Mindest-Cash-Reserve", "6 %", "Trockenpulver bleibt fast immer verfügbar."),
+            ("Override-Schwelle", "90 %", "Reserve wird nur bei echten Ausnahme-Signalen unterschritten."),
+        ],
+        "cash_logic": "1. Berechne Ziel-Cash aus Regime, Soft-Cash-Quote und Mindest-Cash-Reserve.\n2. Prüfe den besten verfügbaren Titel.\n3. Wenn dessen verfeinerter Score >= Override-Schwelle ist, darf die Reserve teilweise unterschritten werden.\n4. Je höher der Score über der Schwelle liegt, desto mehr Reserve darf temporär investiert werden.\n5. Fällt kein Titel über die Schwelle, bleibt die Mindest-Cash-Reserve unangetastet.",
+    },
+    "EN": {
+        "Aggressive": [
+            ("Conviction strength", "2.2", "Pushes winners harder while staying below the previous extreme range."),
+            ("Max weight per asset", "24 %", "Limits concentration without choking strong trends too early."),
+            ("Volatility penalty", "0.22", "Mainly cools down the wildest names while momentum still works."),
+            ("Minimum score", "0.18", "Only assets with solid combined quality can enter."),
+            ("Top-N", "6", "More diversified than 4–5 while still focused."),
+            ("Cash floor", "3 %", "Keeps dry powder for new setups."),
+            ("Cash ceiling", "10 %", "In strong regimes the bot stays largely invested."),
+            ("Soft-cash investment ratio", "95 %", "Aggressive, but not fully maxed out."),
+            ("Minimum cash reserve", "4 %", "Reserve for new high-conviction entries."),
+            ("Override threshold", "87 %", "Only exceptional scores may eat into the reserve."),
+        ],
+        "Robust": [
+            ("Conviction strength", "1.6", "Softer concentration and fewer drawdown spikes."),
+            ("Max weight per asset", "18 %", "Much broader spread and lower single-name risk."),
+            ("Volatility penalty", "0.42", "Highly volatile names are penalized more clearly."),
+            ("Minimum score", "0.26", "Higher hurdle improves the average quality of holdings."),
+            ("Top-N", "8", "Broader, sturdier and less meme-heavy."),
+            ("Cash floor", "5 %", "Adds more defensive flexibility in transition regimes."),
+            ("Cash ceiling", "14 %", "Allows deliberately higher cash in difficult regimes."),
+            ("Soft-cash investment ratio", "90 %", "Creates more buffer against deep drawdowns."),
+            ("Minimum cash reserve", "6 %", "Dry powder remains available almost all the time."),
+            ("Override threshold", "90 %", "The reserve is only breached for truly exceptional signals."),
+        ],
+        "cash_logic": "1. Compute target cash from regime, soft-cash ratio and minimum cash reserve.\n2. Check the strongest currently available asset.\n3. If its refined score is above the override threshold, the reserve may be partly broken.\n4. The further the score is above the threshold, the more reserve may be deployed temporarily.\n5. If no asset clears the threshold, the minimum cash reserve stays untouched.",
+    },
+}
+
+def render_bot_variants(lang: str, T: dict):
+    payload = BOT_VARIANTS.get(lang, BOT_VARIANTS["DE"])
+    st.markdown(T["bot_variants_intro"])
+    for variant_name in [k for k in payload.keys() if k != "cash_logic"]:
+        variant_rows = payload[variant_name]
+        st.markdown(f"#### {variant_name}")
+        st.dataframe(
+            pd.DataFrame(variant_rows, columns=[T["variant_parameter"], T["variant_value"], T["variant_reason"]]),
+            use_container_width=True,
+            hide_index=True,
+        )
+    st.markdown(f"#### {T['cash_logic_title']}")
+    st.code(payload["cash_logic"], language="text")
 
 
 def _safe_pct_rank(series: pd.Series) -> pd.Series:
@@ -2708,7 +2816,7 @@ def should_skip_sale_for_tax(ticker: str, current_shares: float, target_shares: 
 
 
 
-def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score: pd.DataFrame, regime_df: pd.DataFrame, component_scores: dict, effective_top_n: int, max_weight: float, soft_cash_mode: bool, cash_floor: float, cash_ceiling: float, soft_invest_ratio: float, min_score_user: float, conviction_power: float) -> dict:
+def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score: pd.DataFrame, regime_df: pd.DataFrame, component_scores: dict, effective_top_n: int, max_weight: float, soft_cash_mode: bool, cash_floor: float, cash_ceiling: float, soft_invest_ratio: float, min_score_user: float, conviction_power: float, min_cash_reserve: float = 0.05, score_override_threshold: float = 85.0) -> dict:
     regime_code = regime_df.loc[date, "regime_code"]
     profile = get_regime_profile(regime_code)
     available = current_prices.dropna().index.tolist()
@@ -2719,23 +2827,30 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
     momentum_today = component_scores["momentum"].loc[date].reindex(available).fillna(50)
     regime_fit_today = component_scores["regime_fit"].loc[date].reindex(available).fillna(50)
 
-    dynamic_floor = max(min_score_user * 100, profile["min_score"] - 10.0)
+    refined_score_today = (
+        score_today
+        + regime_fit_today.reindex(score_today.index).fillna(50) * 0.08
+        + momentum_today.reindex(score_today.index).fillna(50) * 0.04
+        + trend_today.reindex(score_today.index).fillna(50) * 0.03
+        + risk_today.reindex(score_today.index).fillna(50) * 0.02
+        - (100.0 - risk_today.reindex(score_today.index).fillna(50)) * 0.015
+    )
+    dynamic_floor = max(min_score_user * 100.0, profile["min_score"] - 6.0)
 
     if regime_code == "BULL":
-        eligible = score_today[(trend_today.reindex(score_today.index) >= 42) & (momentum_today.reindex(score_today.index) >= 38)]
-        eligible = eligible + regime_fit_today.reindex(eligible.index).fillna(50) * 0.04 + quality_today.reindex(eligible.index).fillna(50) * 0.02
+        eligible = refined_score_today[(trend_today.reindex(refined_score_today.index) >= 42) & (momentum_today.reindex(refined_score_today.index) >= 38)]
     elif regime_code == "TRANSITION":
-        eligible = score_today[(quality_today.reindex(score_today.index) >= 34) & (risk_today.reindex(score_today.index) >= 30)]
+        eligible = refined_score_today[(quality_today.reindex(refined_score_today.index) >= 34) & (risk_today.reindex(refined_score_today.index) >= 30)]
     elif regime_code == "BEAR":
-        eligible = score_today[(risk_today.reindex(score_today.index) >= 28) & (quality_today.reindex(score_today.index) >= 32)]
+        eligible = refined_score_today[(risk_today.reindex(refined_score_today.index) >= 28) & (quality_today.reindex(refined_score_today.index) >= 32)]
     else:
-        eligible = score_today[(trend_today.reindex(score_today.index) >= 42) & (momentum_today.reindex(score_today.index) >= 38)]
+        eligible = refined_score_today[(trend_today.reindex(refined_score_today.index) >= 42) & (momentum_today.reindex(refined_score_today.index) >= 38)]
 
     eligible = eligible[eligible >= dynamic_floor]
     selected = eligible.sort_values(ascending=False).head(effective_top_n)
 
     if len(selected) == 0:
-        fallback = score_today.head(effective_top_n)
+        fallback = refined_score_today.head(effective_top_n)
         if len(fallback) == 0:
             return {
                 "selected": pd.Series(dtype=float),
@@ -2748,30 +2863,41 @@ def build_target_portfolio_for_date(date, current_prices: pd.Series, total_score
 
         shifted = fallback - fallback.min() + 1e-6
         weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.05, conviction_power - 0.2))
-        invest_ratio = min(0.96, soft_invest_ratio) if soft_cash_mode else 0.93
+        reserve_floor = float(np.clip(max(cash_floor, min_cash_reserve), 0.0, cash_ceiling))
+        invest_ratio = min(max(1.0 - reserve_floor, 0.70), min(0.96, soft_invest_ratio) if soft_cash_mode else 0.93)
         return {
             "selected": fallback,
             "weights": weights,
             "invest_ratio": invest_ratio,
             "regime_code": regime_code,
             "strategy_name": profile["strategy"] + " / Flexible Fallback",
-            "cash_target": min(max(cash_floor, profile["cash_target"]), cash_ceiling),
+            "cash_target": min(max(cash_floor, profile["cash_target"], min_cash_reserve), cash_ceiling),
+            "score_override_active": False,
+            "refined_scores": refined_score_today,
         }
 
     shifted = selected - selected.min() + 1e-6
     weights = conviction_weights(shifted, max_weight=max_weight, power=max(1.1, min(conviction_power, 2.0)))
-    invest_ratio = min(0.96, soft_invest_ratio) if soft_cash_mode else 0.93
+    base_cash_target = min(max(cash_floor, profile["cash_target"], min_cash_reserve), cash_ceiling)
+    top_refined_score = float(selected.iloc[0]) if len(selected) else 0.0
+    score_override_active = top_refined_score >= float(score_override_threshold)
+    override_strength = float(np.clip((top_refined_score - float(score_override_threshold)) / 15.0, 0.0, 1.0)) if score_override_active else 0.0
+    reserve_release = min(min_cash_reserve * 0.75, min_cash_reserve * override_strength) if score_override_active else 0.0
+    effective_cash_target = float(np.clip(max(cash_floor, base_cash_target - reserve_release), 0.0, cash_ceiling))
+    invest_ratio = min(max(1.0 - effective_cash_target, 0.70), min(0.985, soft_invest_ratio) if soft_cash_mode else 0.93)
     return {
         "selected": selected,
         "weights": weights,
         "invest_ratio": invest_ratio,
         "regime_code": regime_code,
         "strategy_name": profile["strategy"],
-        "cash_target": min(max(cash_floor, profile["cash_target"]), cash_ceiling),
+        "cash_target": effective_cash_target,
+        "score_override_active": score_override_active,
+        "refined_scores": refined_score_today,
     }
 
 @st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
-def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, top_n: int, simulate_taxes_de: bool, benchmark_tickers: tuple = (), weight_chart_top_n_value: int = 8, enable_ki_explanations_flag: bool = False, use_regime_filter_flag: bool = False, alignment_info: dict | None = None):
+def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_capital: float, monthly_savings: float, rebalance_freq: str, fee_pct: float, min_score: float, max_weight_pct: int, vol_penalty: float, cash_interest_pct: float, show_debug: bool, conviction_power: float, soft_cash_mode: bool, target_cash_floor_pct: int, target_cash_ceiling_pct: int, soft_cash_invest_ratio_pct: int, min_cash_reserve_pct: int = 5, score_override_threshold: int = 85, top_n: int = 8, simulate_taxes_de: bool = False, benchmark_tickers: tuple = (), weight_chart_top_n_value: int = 20, enable_ki_explanations_flag: bool = False, use_regime_filter_flag: bool = False, alignment_info: dict | None = None):
     prices = sanitize_price_panel(prices.sort_index().copy())
     tickers = list(prices.columns)
     effective_top_n = min(top_n, len(tickers))
@@ -2783,6 +2909,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
     if cash_floor > cash_ceiling:
         cash_floor = min(cash_floor, cash_ceiling)
     soft_invest_ratio = float(np.clip(soft_cash_invest_ratio_pct / 100.0, 0.70, 1.0))
+    min_cash_reserve = float(np.clip(min_cash_reserve_pct / 100.0, 0.0, 0.15))
+    score_override_threshold = float(np.clip(score_override_threshold, 60, 99))
     tax_rate = 0.26375
     T_local = TRANSLATIONS[lang]
     bot_tax_state = {"year": None, "used_allowance": 0.0, "taxes_paid_total": 0.0}
@@ -2881,6 +3009,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
                 soft_invest_ratio=soft_invest_ratio,
                 min_score_user=min_score,
                 conviction_power=conviction_power,
+                min_cash_reserve=min_cash_reserve,
+                score_override_threshold=score_override_threshold,
             )
             tmp_selected = cached_strategy_payload["selected"]
             tmp_weights = cached_strategy_payload["weights"]
@@ -2903,6 +3033,7 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         regime_code = cached_strategy_payload["regime_code"]
         invest_ratio = float(np.clip(cached_strategy_payload["invest_ratio"], 0.0, 1.0))
         strategy_name = cached_strategy_payload["strategy_name"]
+        score_override_active = bool(cached_strategy_payload.get("score_override_active", False))
 
         target_values = np.zeros(len(tickers), dtype=float)
         investable_capital = total_equity_before * invest_ratio
@@ -2996,6 +3127,14 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
             bot_tax_state["taxes_paid_total"] += taxes_due_total
             invested_value_after = float(np.nansum(np.where(valid_price_mask[i], shares_arr * current_prices_np, 0.0)))
             cash = max(0.0, total_equity_after_fees - invested_value_after - taxes_due_total)
+            if not score_override_active:
+                minimum_cash_now = max(0.0, total_equity_after_fees * min_cash_reserve)
+                if cash < minimum_cash_now and invested_value_after > 0:
+                    deficit = minimum_cash_now - cash
+                    reduction_factor = max(0.0, 1.0 - safe_div(deficit, invested_value_after, default=0.0))
+                    shares_arr = shares_arr * reduction_factor
+                    invested_value_after = float(np.nansum(np.where(valid_price_mask[i], shares_arr * current_prices_np, 0.0)))
+                    cash = max(0.0, total_equity_after_fees - invested_value_after - taxes_due_total)
 
             target_weights_log[date] = {
                 tkr: safe_div(target_values[ticker_to_idx[tkr]], total_equity_before, default=0.0)
@@ -3014,6 +3153,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
                 )
 
             reason_parts = [strategy_name]
+            if score_override_active:
+                reason_parts.append("Cash-Reserve-Override" if lang == "DE" else "cash reserve override")
             if scheduled_rebalance:
                 reason_parts.append("Zeit-Trigger" if lang == "DE" else "time trigger")
             if threshold_trigger:
@@ -3179,6 +3320,8 @@ def simulate_allocato_v2(prices: pd.DataFrame, period: str, lang: str, initial_c
         "soft_cash_mode": soft_cash_mode,
         "target_cash_floor_pct": target_cash_floor_pct,
         "target_cash_ceiling_pct": target_cash_ceiling_pct,
+        "min_cash_reserve_pct": min_cash_reserve_pct,
+        "score_override_threshold": score_override_threshold,
         "equity_bot": equity_bot,
         "equity_bh": equity_bh,
         "equity_bot_raw": equity_bot_raw,
@@ -3299,6 +3442,8 @@ def render_calculation_results(context, T, lang, tier):
     soft_cash_mode = context["soft_cash_mode"]
     target_cash_floor_pct = context["target_cash_floor_pct"]
     target_cash_ceiling_pct = context["target_cash_ceiling_pct"]
+    min_cash_reserve_pct = context.get("min_cash_reserve_pct", 0)
+    score_override_threshold = context.get("score_override_threshold", 85)
     equity_bot = context["equity_bot"]
     equity_bh = context["equity_bh"]
     cumulative_contributions = context["cumulative_contributions"]
@@ -3561,7 +3706,10 @@ def render_calculation_results(context, T, lang, tier):
 
     with st.expander(T["how_returns_expander"], expanded=False):
         st.markdown(T["how_returns_text"])
-    
+
+    with st.expander(T["bot_variants_expander"], expanded=False):
+        render_bot_variants(lang, T)
+
     with st.expander(T["annual_returns_title"], expanded=True):
         if not annual_returns_df.empty:
             annual_display_df = annual_returns_df.copy()
@@ -3666,7 +3814,18 @@ def render_calculation_results(context, T, lang, tier):
             numeric_cols = display_rebal_df.select_dtypes(include=[np.number]).columns
             display_rebal_df[numeric_cols] = display_rebal_df[numeric_cols].round(2)
             styled_rebal_df = style_rebalance_log(display_rebal_df, T["rebal_buys_col"], T["rebal_sells_col"])
-            st.dataframe(styled_rebal_df, use_container_width=True)
+            st.dataframe(
+                styled_rebal_df,
+                use_container_width=True,
+                height=min(620, 80 + len(display_rebal_df) * 36),
+                column_config={
+                    T["selected_assets_col"]: st.column_config.TextColumn(width="medium", help="Mehrfachauswahl und Umschichtungen werden automatisch umgebrochen." if lang == "DE" else "Selections and rebalances are wrapped automatically."),
+                    T["rebal_buys_col"]: st.column_config.TextColumn(width="large"),
+                    T["rebal_sells_col"]: st.column_config.TextColumn(width="large"),
+                    T["rebal_reason_col"]: st.column_config.TextColumn(width="medium"),
+                    T["buy_hold_action_col"]: st.column_config.TextColumn(width="medium"),
+                },
+            )
         else:
             st.write(T["rebal_log_empty"])
     
@@ -3839,6 +3998,10 @@ st.markdown(
     }
     .hero-badge, .story-box, .sidebar-account-card, .sidebar-subscription-panel {
         animation: floatFade .35s ease-out;
+    }
+    [data-testid="stDataFrame"] div[role="gridcell"] {
+        white-space: normal !important;
+        word-break: break-word !important;
     }
     @keyframes floatFade {
         from { opacity: 0; transform: translateY(6px); }
@@ -4342,6 +4505,17 @@ if "soft_cash_invest_ratio_pct" in st.session_state:
     except Exception:
         st.session_state["soft_cash_invest_ratio_pct"] = 95
 
+if "min_cash_reserve_pct" in st.session_state:
+    try:
+        st.session_state["min_cash_reserve_pct"] = int(np.clip(int(st.session_state.get("min_cash_reserve_pct", 5)), 0, 15))
+    except Exception:
+        st.session_state["min_cash_reserve_pct"] = 5
+if "score_override_threshold" in st.session_state:
+    try:
+        st.session_state["score_override_threshold"] = int(np.clip(int(st.session_state.get("score_override_threshold", 85)), 60, 99))
+    except Exception:
+        st.session_state["score_override_threshold"] = 85
+
 target_cash_ceiling_pct = st.sidebar.slider(
     T["cash_ceiling"],
     min_value=5,
@@ -4355,9 +4529,27 @@ soft_cash_invest_ratio_pct = st.sidebar.slider(
     T["soft_cash_ratio"],
     min_value=70,
     max_value=100,
-    step=5,
+    step=1,
     key="soft_cash_invest_ratio_pct",
     help=T["soft_cash_ratio_help"],
+)
+
+min_cash_reserve_pct = st.sidebar.slider(
+    T["min_cash_reserve"],
+    min_value=0,
+    max_value=15,
+    step=1,
+    key="min_cash_reserve_pct",
+    help=T["min_cash_reserve_help"],
+)
+
+score_override_threshold = st.sidebar.slider(
+    T["score_override_threshold"],
+    min_value=60,
+    max_value=99,
+    step=1,
+    key="score_override_threshold",
+    help=T["score_override_threshold_help"],
 )
 
 st.sidebar.subheader(T["visualization"])
@@ -4365,7 +4557,7 @@ st.sidebar.subheader(T["visualization"])
 weight_chart_top_n = st.sidebar.slider(
     T["weight_chart_top_n"],
     min_value=5,
-    max_value=15,
+    max_value=40,
     step=1,
     key="weight_chart_top_n",
     help=T["weight_chart_top_n_help"],
@@ -4672,6 +4864,8 @@ if calculate_clicked:
                 target_cash_floor_pct=int(target_cash_floor_pct),
                 target_cash_ceiling_pct=int(target_cash_ceiling_pct),
                 soft_cash_invest_ratio_pct=int(soft_cash_invest_ratio_pct),
+                min_cash_reserve_pct=int(min_cash_reserve_pct),
+                score_override_threshold=int(score_override_threshold),
                 top_n=int(top_n),
                 simulate_taxes_de=bool(simulate_taxes_de),
                 benchmark_tickers=tuple(get_benchmark_list()),
